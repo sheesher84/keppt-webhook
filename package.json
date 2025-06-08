@@ -1,0 +1,12 @@
+{
+  "name": "keppt-webhook",
+  "version": "1.0.0",
+  "main": "api/postmark-handler.js",
+  "scripts": {
+    "start": "node api/postmark-handler.js"
+  },
+  "dependencies": {
+    "openai": "^4.0.0",
+    "formidable": "^3.5.0"
+  }
+}
