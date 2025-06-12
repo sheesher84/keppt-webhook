@@ -21,19 +21,26 @@ export default async function handler(req, res) {
 
   const receivedAt = new Date();
 
-  const parsedAmount = /\$[\d,]+\.\d{2}/.exec(TextBody || HtmlBody || '')?.[0];
-  const parsedVendor = From?.split('@')[1]?.split('.')[0];
+  // Extract dollar amount like "$67.89"
+  const rawAmountMatch = /\$[\d,]+\.\d{2}/.exec(TextBody || HtmlBody || '');
+  const parsedAmount = rawAmountMatch
+    ? rawAmountMatch[0].replace(/[^0-9.]/g, '') // "67.89"
+    : null;
+
+  // Parse vendor from email
+  const parsedVendor = From?.split('@')[1]?.split('.')[0] || null;
 
   const { error } = await supabase
     .from('receipts')
     .insert([{
-      email_sender: From,
-      subject: Subject,
-      body_text: TextBody,
-      body_html: HtmlBody,
-      amount: parsedAmount,
-      vendor: parsedVendor,
-      message_id: MessageID,
+      email_sender: From || null,
+      subject: Subject || null,
+      body_text: TextBody || null,
+      body_html: HtmlBody || null,
+      total_amount: parsedAmount ? parseFloat(parsedAmount) : null,
+      vendor: parsedVendor,              // Kept for backward compatibility
+      vendor_name: parsedVendor,         // Preferred field name
+      message_id: MessageID || null,
       received_at: receivedAt,
     }]);
 
@@ -43,4 +50,6 @@ export default async function handler(req, res) {
   }
 
   return res.status(200).json({ message: 'Email processed successfully' });
+}
+
 }
