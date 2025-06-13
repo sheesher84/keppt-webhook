@@ -10,6 +10,15 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
+  // 🔍 DEBUG: log env-vars so we can confirm the service role key is loaded
+  console.log('→ SUPABASE_URL=', process.env.SUPABASE_URL);
+  console.log(
+    '→ SUPABASE_SERVICE_ROLE_KEY=',
+    process.env.SUPABASE_SERVICE_ROLE_KEY
+      ? `${process.env.SUPABASE_SERVICE_ROLE_KEY.slice(0, 8)}…`
+      : null
+  );
+
   const {
     From,
     Subject,
@@ -21,7 +30,7 @@ export default async function handler(req, res) {
 
   const receivedAt = new Date();
 
-  // 1) Parse and clean the amount (strip "$" for numeric)
+  // 1) Parse and clean the amount (strip "$" for numeric insertion)
   const rawAmount = /\$[\d,]+\.\d{2}/.exec(TextBody || HtmlBody || '')?.[0] || null;
   const cleanedAmount = rawAmount
     ? parseFloat(rawAmount.replace(/[$,]/g, ''))
