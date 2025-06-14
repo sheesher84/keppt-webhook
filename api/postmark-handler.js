@@ -7,7 +7,7 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// Initialize OpenAI (v4)
+// Initialize OpenAI
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
@@ -17,7 +17,7 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
-  // DEBUG: log env-vars
+  // DEBUG: log env-vars to confirm they’re loaded
   console.log('→ SUPABASE_URL=', process.env.SUPABASE_URL);
   console.log(
     '→ SUPABASE_SERVICE_ROLE_KEY=',
@@ -26,11 +26,11 @@ export default async function handler(req, res) {
       : null
   );
 
-  const { From, Subject, TextBody, HtmlBody, Attachments, MessageID } = req.body;
-  const receivedAt = new Date();
+  const { From, Subject, TextBody, HtmlBody, MessageID } = req.body;
   const body = TextBody || HtmlBody || '';
+  const receivedAt = new Date();
 
-  // 1) Attempt GPT-4 parsing
+  // 1) Attempt GPT-4.1-mini parsing
   let merchant, order_date, total_amount, category;
   try {
     const prompt = `
@@ -47,7 +47,7 @@ ${body}
     `.trim();
 
     const completion = await openai.chat.completions.create({
-      model: 'gpt-4',
+      model: 'gpt-4.1-mini',
       messages: [{ role: 'user', content: prompt }],
       temperature: 0
     });
@@ -62,7 +62,7 @@ ${body}
 
     // 2) Regex fallback
 
-    // amount
+    // total_amount
     const rawAmtMatch = /\$[\d,]+\.\d{2}/.exec(body)?.[0] || null;
     total_amount = rawAmtMatch
       ? parseFloat(rawAmtMatch.replace(/[$,]/g, ''))
@@ -77,7 +77,7 @@ ${body}
       ? vendorLineMatch[1].trim()
       : From?.split('@')[1]?.split('.')[0] || null;
 
-    // order date
+    // order_date
     const dateMatch = /\b([A-Za-z]+ \d{1,2}, \d{4})\b/.exec(body)?.[1] || null;
     order_date = dateMatch
       ? new Date(dateMatch).toISOString().split('T')[0]
