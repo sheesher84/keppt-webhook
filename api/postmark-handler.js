@@ -1,8 +1,15 @@
 import { createClient } from '@supabase/supabase-js';
+import { Configuration, OpenAIApi } from 'openai';
 
+// Initialize Supabase
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
+);
+
+// Initialize OpenAI
+const openai = new OpenAIApi(
+  new Configuration({ apiKey: process.env.OPENAI_API_KEY })
 );
 
 export default async function handler(req, res) {
@@ -10,7 +17,7 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
-  // 🔍 DEBUG: log env-vars so we can confirm the service role key is loaded
+  // DEBUG: log env‐vars
   console.log('→ SUPABASE_URL=', process.env.SUPABASE_URL);
   console.log(
     '→ SUPABASE_SERVICE_ROLE_KEY=',
@@ -19,50 +26,85 @@ export default async function handler(req, res) {
       : null
   );
 
-  const {
-    From,
-    Subject,
-    TextBody,
-    HtmlBody,
-    Attachments,
-    MessageID,
-  } = req.body;
-
+  const { From, Subject, TextBody, HtmlBody, Attachments, MessageID } = req.body;
   const receivedAt = new Date();
-
-  // 1) Parse and clean the amount (strip "$" for numeric insertion)
-  const rawAmount = /\$[\d,]+\.\d{2}/.exec(TextBody || HtmlBody || '')?.[0] || null;
-  const cleanedAmount = rawAmount
-    ? parseFloat(rawAmount.replace(/[$,]/g, ''))
-    : null;
-
-  // 2) Improved vendor parsing from the email body
-  let parsedVendor = null;
   const body = TextBody || HtmlBody || '';
-  const purchaseMatch = /purchase from\s+([A-Za-z0-9 &]+)/i.exec(body);
-  const vendorLineMatch = /Vendor:\s*([^\.\n]+)/i.exec(body);
-  if (purchaseMatch) {
-    parsedVendor = purchaseMatch[1].trim();
-  } else if (vendorLineMatch) {
-    parsedVendor = vendorLineMatch[1].trim();
-  } else {
-    parsedVendor = From?.split('@')[1]?.split('.')[0] || null;
+
+  // 1) Attempt GPT-4 parsing
+  let merchant, order_date, total_amount, category;
+  try {
+    const prompt = `
+You are a JSON-only parser for email receipts. Given an email body, extract exactly the following fields:
+- merchant (string)
+- order_date (YYYY-MM-DD)
+- total_amount (number)
+- category (one of: Groceries, Travel, Utilities, Other)
+
+Respond with only the JSON object.
+
+Email body:
+${body}
+    `.trim();
+
+    const completion = await openai.createChatCompletion({
+      model: 'gpt-4',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0,
+    });
+
+    const parsed = JSON.parse(completion.data.choices[0].message.content);
+    merchant      = parsed.merchant;
+    order_date    = parsed.order_date;
+    total_amount  = parsed.total_amount;
+    category      = parsed.category;
+  } catch (err) {
+    console.error('OpenAI parsing failed, falling back to regex:', err);
+
+    // 2) Regex fallback
+
+    // amount
+    const rawAmtMatch = /\$[\d,]+\.\d{2}/.exec(body)?.[0] || null;
+    total_amount = rawAmtMatch
+      ? parseFloat(rawAmtMatch.replace(/[$,]/g, ''))
+      : null;
+
+    // merchant
+    const purchaseMatch   = /purchase from\s+([A-Za-z0-9 &]+)/i.exec(body);
+    const vendorLineMatch = /Vendor:\s*([^\.\n]+)/i.exec(body);
+    merchant = purchaseMatch
+      ? purchaseMatch[1].trim()
+      : vendorLineMatch
+      ? vendorLineMatch[1].trim()
+      : From?.split('@')[1]?.split('.')[0] || null;
+
+    // order date
+    const dateMatch = /\b([A-Za-z]+ \d{1,2}, \d{4})\b/.exec(body)?.[1] || null;
+    order_date = dateMatch
+      ? new Date(dateMatch).toISOString().split('T')[0]
+      : null;
+
+    // category default
+    category = 'Other';
   }
 
   // 3) Insert into Supabase
   const { error } = await supabase
     .from('receipts')
-    .insert([{
-      email_sender: From || null,
-      subject: Subject || null,
-      body_text: TextBody || null,
-      body_html: HtmlBody || null,
-      total_amount: cleanedAmount,
-      vendor: parsedVendor,
-      vendor_name: parsedVendor,
-      message_id: MessageID || null,
-      received_at: receivedAt,
-    }]);
+    .insert([
+      {
+        email_sender: From || null,
+        subject:      Subject || null,
+        body_text:    TextBody || null,
+        body_html:    HtmlBody || null,
+        total_amount,
+        vendor:       merchant,
+        vendor_name:  merchant,
+        order_date,
+        category,
+        message_id:   MessageID || null,
+        received_at:  receivedAt,
+      },
+    ]);
 
   if (error) {
     console.error('Supabase insert error:', error);
