@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import { Configuration, OpenAIApi } from 'openai';
+import OpenAI from 'openai';
 
 // Initialize Supabase
 const supabase = createClient(
@@ -7,17 +7,17 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// Initialize OpenAI
-const openai = new OpenAIApi(
-  new Configuration({ apiKey: process.env.OPENAI_API_KEY })
-);
+// Initialize OpenAI (v4)
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+});
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
-  // DEBUG: log env‐vars
+  // DEBUG: log env-vars
   console.log('→ SUPABASE_URL=', process.env.SUPABASE_URL);
   console.log(
     '→ SUPABASE_SERVICE_ROLE_KEY=',
@@ -46,13 +46,13 @@ Email body:
 ${body}
     `.trim();
 
-    const completion = await openai.createChatCompletion({
+    const completion = await openai.chat.completions.create({
       model: 'gpt-4',
       messages: [{ role: 'user', content: prompt }],
-      temperature: 0,
+      temperature: 0
     });
 
-    const parsed = JSON.parse(completion.data.choices[0].message.content);
+    const parsed = JSON.parse(completion.choices[0].message.content);
     merchant      = parsed.merchant;
     order_date    = parsed.order_date;
     total_amount  = parsed.total_amount;
@@ -83,28 +83,26 @@ ${body}
       ? new Date(dateMatch).toISOString().split('T')[0]
       : null;
 
-    // category default
+    // default category
     category = 'Other';
   }
 
   // 3) Insert into Supabase
   const { error } = await supabase
     .from('receipts')
-    .insert([
-      {
-        email_sender: From || null,
-        subject:      Subject || null,
-        body_text:    TextBody || null,
-        body_html:    HtmlBody || null,
-        total_amount,
-        vendor:       merchant,
-        vendor_name:  merchant,
-        order_date,
-        category,
-        message_id:   MessageID || null,
-        received_at:  receivedAt,
-      },
-    ]);
+    .insert([{
+      email_sender: From || null,
+      subject:      Subject || null,
+      body_text:    TextBody || null,
+      body_html:    HtmlBody || null,
+      total_amount,
+      vendor:       merchant,
+      vendor_name:  merchant,
+      order_date,
+      category,
+      message_id:   MessageID || null,
+      received_at:  receivedAt
+    }]);
 
   if (error) {
     console.error('Supabase insert error:', error);
