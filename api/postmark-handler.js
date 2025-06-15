@@ -1,6 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
 
-// Initialize Supabase
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -15,14 +14,13 @@ export default async function handler(req, res) {
   const body = TextBody || HtmlBody || '';
   const receivedAt = new Date();
 
-  // Regex-only parsing
-  // 1) total_amount
-  const rawAmt = /\$[\d,]+\.\d{2}/.exec(body)?.[0] || null;
-  const total_amount = rawAmt
-    ? parseFloat(rawAmt.replace(/[$,]/g, ''))
+  // 1) Parse total_amount with regex and strip "$"
+  const rawAmtMatch = /\$[\d,]+\.\d{2}/.exec(body)?.[0] || null;
+  const total_amount = rawAmtMatch
+    ? parseFloat(rawAmtMatch.replace(/[$,]/g, ''))
     : null;
 
-  // 2) merchant/vendor
+  // 2) Parse merchant/vendor from body, fallback to sender domain
   const purchaseMatch   = /purchase from\s+([A-Za-z0-9 &]+)/i.exec(body);
   const vendorLineMatch = /Vendor:\s*([^\.\n]+)/i.exec(body);
   const merchant = purchaseMatch
@@ -31,16 +29,16 @@ export default async function handler(req, res) {
     ? vendorLineMatch[1].trim()
     : From?.split('@')[1]?.split('.')[0] || null;
 
-  // 3) order_date
+  // 3) Parse order_date from body (e.g., "June 11, 2025")
   const dateMatch = /\b([A-Za-z]+ \d{1,2}, \d{4})\b/.exec(body)?.[1] || null;
   const order_date = dateMatch
     ? new Date(dateMatch).toISOString().split('T')[0]
     : null;
 
-  // 4) default category
+  // 4) Default category
   const category = 'Other';
 
-  // Insert into Supabase
+  // 5) Insert into Supabase
   const { error } = await supabase
     .from('receipts')
     .insert([{
