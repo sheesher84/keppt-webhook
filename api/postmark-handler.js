@@ -14,13 +14,13 @@ export default async function handler(req, res) {
   const body = (TextBody || HtmlBody || '').replace(/\r/g, '');
   const receivedAt = new Date();
 
-  // 1) total_amount
+  // 1) Parse total_amount
   const rawAmt = /\$[\d,]+\.\d{2}/.exec(body)?.[0] || null;
   const total_amount = rawAmt
     ? parseFloat(rawAmt.replace(/[$,]/g, ''))
     : null;
 
-  // 2) vendor
+  // 2) Parse vendor
   const purchaseMatch   = /purchase from\s+([A-Za-z0-9 &]+)/i.exec(body);
   const vendorLineMatch = /Vendor:\s*([^\.\n]+)/i.exec(body);
   const vendor = purchaseMatch
@@ -29,14 +29,17 @@ export default async function handler(req, res) {
     ? vendorLineMatch[1].trim()
     : From?.split('@')[1]?.split('.')[0] || null;
 
-  // 3) order_date
+  // 3) Parse order_date
   const dateMatch = /\b([A-Za-z]+ \d{1,2}, \d{4})\b/.exec(body)?.[1] || null;
   const order_date = dateMatch
     ? new Date(dateMatch).toISOString().split('T')[0]
     : null;
 
-  // 4) form_of_payment, card_type & card_last4 (as before)
-  let form_of_payment = null, card_type = null, card_last4 = null;
+  // 4) Parse form_of_payment, card_type & card_last4
+  let form_of_payment = null;
+  let card_type       = null;
+  let card_last4      = null;
+
   const cardMatch = /([A-Za-z]{2,})\s+x+(\d{4})/i.exec(body);
   if (cardMatch) {
     const rawType = cardMatch[1];
@@ -50,45 +53,39 @@ export default async function handler(req, res) {
     form_of_payment = 'Cash';
   }
 
-  // 5) Determine category_id
-
-  // 5a) First, explicit “Category:” line
+  // 5) Determine category_name & category_id via DB lookups
   let category_name = null;
+  let category_id   = null;
+
+  // 5a) Explicit “Category:” header
   const catHdr = /Category:\s*([^\.\n]+)/i.exec(body);
   if (catHdr) {
     category_name = catHdr[1].trim();
+    const { data: cat } = await supabase
+      .from('categories')
+      .select('id')
+      .eq('name', category_name)
+      .maybeSingle();
+    if (cat) category_id = cat.id;
   }
 
-  // 5b) Next, try vendor_categories DB lookup
-  let category_id = null;
+  // 5b) vendor_categories lookup
   if (!category_id && vendor) {
     const { data: vc } = await supabase
       .from('vendor_categories')
       .select('category_id')
       .ilike('vendor_pattern', `%${vendor.toLowerCase()}%`)
       .limit(1)
-      .single();
-    if (vc) {
-      category_id = vc.category_id;
-      // optionally set category_name via join but this isn't needed for insertion
-    }
-  }
-
-  // 5c) Next, if we got a category_name from the header but no ID yet, look it up
-  if (category_name && !category_id) {
-    const { data: cat } = await supabase
-      .from('categories')
-      .select('id')
-      .eq('name', category_name)
       .maybeSingle();
-    if (cat) {
-      category_id = cat.id;
+    if (vc) {
+      category_id   = vc.category_id;
+      // (optional) fetch category_name via categories table if needed
     }
   }
 
-  // 5d) Fallback to “Other”
+  // 5c) Fallback to “Other”
   if (!category_id) {
-    category_name = category_name || 'Other';
+    category_name ||= 'Other';
     const { data: other } = await supabase
       .from('categories')
       .select('id')
@@ -97,7 +94,7 @@ export default async function handler(req, res) {
     category_id = other?.id || null;
   }
 
-  // 6) Insert
+  // 6) Insert into receipts
   const { error } = await supabase
     .from('receipts')
     .insert([{
