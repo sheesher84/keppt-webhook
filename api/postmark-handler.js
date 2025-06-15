@@ -14,10 +14,10 @@ export default async function handler(req, res) {
   const body = (TextBody || HtmlBody || '').replace(/\r/g, '');
   const receivedAt = new Date();
 
-  // 1) Parse total_amount
-  const rawAmt = /\$[\d,]+\.\d{2}/.exec(body)?.[0] || null;
-  const total_amount = rawAmt
-    ? parseFloat(rawAmt.replace(/[$,]/g, ''))
+  // 1) Parse total_amount (allowing optional decimals)
+  const rawAmtMatch = /\$[\d,]+(?:\.\d{1,2})?/.exec(body)?.[0] || null;
+  const total_amount = rawAmtMatch
+    ? parseFloat(rawAmtMatch.replace(/[$,]/g, ''))
     : null;
 
   // 2) Parse vendor
@@ -35,25 +35,22 @@ export default async function handler(req, res) {
     ? new Date(dateMatch).toISOString().split('T')[0]
     : null;
 
-  // 4) Parse form_of_payment, card_type & card_last4
-  let form_of_payment = null;
-  let card_type       = null;
-  let card_last4      = null;
-
+  // 4) Parse payment info
+  let form_of_payment = null, card_type = null, card_last4 = null;
   const cardMatch = /([A-Za-z]{2,})\s+x+(\d{4})/i.exec(body);
   if (cardMatch) {
     const rawType = cardMatch[1];
-    if (/^(mc|mastercard)$/i.test(rawType))       card_type = 'MasterCard';
-    else if (/^visa$/i.test(rawType))             card_type = 'Visa';
+    if (/^(mc|mastercard)$/i.test(rawType))           card_type = 'MasterCard';
+    else if (/^visa$/i.test(rawType))                 card_type = 'Visa';
     else if (/^(amex|american express)$/i.test(rawType)) card_type = 'AMEX';
-    else                                         card_type = rawType;
+    else                                             card_type = rawType;
     card_last4      = cardMatch[2];
     form_of_payment = 'Card';
   } else if (/cash/i.test(body)) {
     form_of_payment = 'Cash';
   }
 
-  // 5) Determine category_name & category_id via DB lookups
+  // 5) Determine category via DB lookups
   let category_name = null;
   let category_id   = null;
 
@@ -69,7 +66,7 @@ export default async function handler(req, res) {
     if (cat) category_id = cat.id;
   }
 
-  // 5b) vendor_categories lookup
+  // 5b) Try vendor_categories lookup if still no ID
   if (!category_id && vendor) {
     const { data: vc } = await supabase
       .from('vendor_categories')
@@ -79,7 +76,13 @@ export default async function handler(req, res) {
       .maybeSingle();
     if (vc) {
       category_id   = vc.category_id;
-      // (optional) fetch category_name via categories table if needed
+      // Fetch its name too
+      const { data: cat2 } = await supabase
+        .from('categories')
+        .select('name')
+        .eq('id', category_id)
+        .maybeSingle();
+      category_name = cat2?.name || null;
     }
   }
 
@@ -122,3 +125,4 @@ export default async function handler(req, res) {
 
   return res.status(200).json({ message: 'Email processed successfully' });
 }
+
