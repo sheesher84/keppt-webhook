@@ -20,29 +20,41 @@ export default async function handler(req, res) {
     ? parseFloat(rawAmtMatch.replace(/[$,]/g, ''))
     : null;
 
-  // 2) Smart vendor detection
-  const purchaseMatch   = /purchase from\s+([A-Za-z0-9 &]+)/i.exec(body);
-  const vendorLineMatch = /Vendor:\s*([^\.\n]+)/i.exec(body);
-  const fromDomain      = From?.split('@')[1]?.toLowerCase() || '';
-  let vendor;
+  // 2) Vendor detection: Subject → “purchase from” → body Vendor: → domain
+  let vendor = null;
 
-  if (purchaseMatch) {
-    vendor = purchaseMatch[1].trim();
-  } else if (vendorLineMatch) {
-    vendor = vendorLineMatch[1].trim();
-  } else if (fromDomain.includes('amazon.')) {
-    vendor = 'Amazon';
-  } else if (fromDomain.includes('lyft.')) {
-    vendor = 'Lyft';
-  } else if (
-    fromDomain.includes('icloud.') ||
-    fromDomain.includes('me.') ||
-    fromDomain.includes('mac.')
-  ) {
-    vendor = 'Apple';
-  } else {
-    // fallback: first segment of domain
-    vendor = fromDomain.split('.')[0] || null;
+  // 2a) Try merchant name in Subject (e.g., "Amazon.com Order Confirmation")
+  if (Subject) {
+    const subjMatch = /^(.+?)(?: order| receipt| confirmation| -)/i.exec(Subject);
+    if (subjMatch) {
+      vendor = subjMatch[1].trim();
+    }
+  }
+
+  // 2b) Fallback to "purchase from X" in body
+  if (!vendor) {
+    const purchaseMatch = /purchase from\s+([A-Za-z0-9 &\.]+)/i.exec(body);
+    if (purchaseMatch) vendor = purchaseMatch[1].trim();
+  }
+
+  // 2c) Fallback to "Vendor: X"
+  if (!vendor) {
+    const vendorLineMatch = /Vendor:\s*([^\.\n]+)/i.exec(body);
+    if (vendorLineMatch) vendor = vendorLineMatch[1].trim();
+  }
+
+  // 2d) Final fallback to known domains
+  if (!vendor && From) {
+    const domain = From.split('@')[1].toLowerCase();
+    if (domain.includes('amazon.')) {
+      vendor = 'Amazon';
+    } else if (domain.includes('lyft.')) {
+      vendor = 'Lyft';
+    } else if (/(?:icloud|me|mac)\./.test(domain)) {
+      vendor = 'Apple';
+    } else {
+      vendor = domain.split('.')[0];
+    }
   }
 
   // 3) Parse order_date
@@ -140,4 +152,3 @@ export default async function handler(req, res) {
 
   return res.status(200).json({ message: 'Email processed successfully' });
 }
-
