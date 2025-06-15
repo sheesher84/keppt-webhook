@@ -14,7 +14,7 @@ export default async function handler(req, res) {
   const body = (TextBody || HtmlBody || '').replace(/\r/g, '');
   const receivedAt = new Date();
 
-  // 1) Parse total_amount (allow optional decimals or whole dollars)
+  // 1) Parse total_amount ($95 or $95.00)
   const rawAmtMatch = /\$[\d,]+(?:\.\d{1,2})?/.exec(body)?.[0] || null;
   const total_amount = rawAmtMatch
     ? parseFloat(rawAmtMatch.replace(/[$,]/g, ''))
@@ -23,15 +23,15 @@ export default async function handler(req, res) {
   // 2) Generic vendor detection
   let vendor = null;
 
-  // 2a) Try merchant name in Subject (strip common suffixes)
+  // 2a) Subject “from X” (e.g. “Your receipt from Apple”)
   if (Subject) {
-    const subjMatch = /^(.+?)(?: order| receipt| confirmation| -)/i.exec(Subject);
-    if (subjMatch) {
-      vendor = subjMatch[1].trim();
+    const subjFrom = /from\s+([A-Za-z0-9 &]+)/i.exec(Subject);
+    if (subjFrom) {
+      vendor = subjFrom[1].trim();
     }
   }
 
-  // 2b) Fallback to "purchase from X" in body
+  // 2b) “purchase from X” in body
   if (!vendor) {
     const purchaseMatch = /purchase from\s+([A-Za-z0-9 &\.]+)/i.exec(body);
     if (purchaseMatch) {
@@ -39,42 +39,55 @@ export default async function handler(req, res) {
     }
   }
 
-  // 2c) Fallback to "Vendor: X" in body
+  // 2c) “Vendor: X” line in body
   if (!vendor) {
-    const vendorLineMatch = /Vendor:\s*([^\.\n]+)/i.exec(body);
-    if (vendorLineMatch) {
-      vendor = vendorLineMatch[1].trim();
+    const vendorLine = /Vendor:\s*([^\.\n]+)/i.exec(body);
+    if (vendorLine) {
+      vendor = vendorLine[1].trim();
     }
   }
 
-  // 2d) Final fallback: first segment of the From domain
+  // 2d) Final fallback: first segment of the domain
   if (!vendor && From) {
-    const domain = From.split('@')[1].toLowerCase();
-    vendor = domain.split('.')[0];
+    vendor = From.split('@')[1].split('.')[0];
   }
 
-  // 3) Parse order_date
+  // 3) Parse order_date (“June 3, 2025” → “2025-06-03”)
   const dateMatch = /\b([A-Za-z]+ \d{1,2}, \d{4})\b/.exec(body)?.[1] || null;
   const order_date = dateMatch
     ? new Date(dateMatch).toISOString().split('T')[0]
     : null;
 
-  // 4) Parse payment info (mask ‘x’ or ‘*’ then 4 digits)
-  let form_of_payment = null, card_type = null, card_last4 = null;
-  const cardMatch = /([A-Za-z]{2,})\s+[x\*]+(\d{4})/i.exec(body);
+  // 4) Parse payment info (bullets •, x, or *)
+  let form_of_payment = null;
+  let card_type       = null;
+  let card_last4      = null;
+
+  const cardMatch = /([A-Za-z]{2,})\s+[x\*\u2022]+(\d{4})/iu.exec(body);
   if (cardMatch) {
     const rawType = cardMatch[1];
-    if (/^(mc|mastercard)$/i.test(rawType))         card_type = 'MasterCard';
-    else if (/^visa$/i.test(rawType))               card_type = 'Visa';
+    if (/^(mc|mastercard)$/i.test(rawType))       card_type = 'MasterCard';
+    else if (/^visa$/i.test(rawType))             card_type = 'Visa';
     else if (/^(amex|american express)$/i.test(rawType)) card_type = 'AMEX';
-    else                                           card_type = rawType;
+    else                                         card_type = rawType;
     card_last4      = cardMatch[2];
     form_of_payment = 'Card';
-  } else if (/cash/i.test(body)) {
-    form_of_payment = 'Cash';
+  } else {
+    // fallback: spot brands in subject or body
+    const brandMatch = /\b(Visa|MasterCard|AMEX|American Express)\b/i.exec(
+      body + ' ' + (Subject || '')
+    );
+    if (brandMatch) {
+      const rawType = brandMatch[1];
+      form_of_payment = 'Card';
+      if (/^(mc|mastercard)$/i.test(rawType))       card_type = 'MasterCard';
+      else if (/^visa$/i.test(rawType))             card_type = 'Visa';
+      else if (/^(amex|american express)$/i.test(rawType)) card_type = 'AMEX';
+      else                                         card_type = rawType;
+    }
   }
 
-  // 5) Determine category via DB lookups only
+  // 5) Determine category via DB (categories + vendor_categories)
   let category_name = null;
   let category_id   = null;
 
@@ -105,7 +118,7 @@ export default async function handler(req, res) {
         .select('name')
         .eq('id', category_id)
         .maybeSingle();
-      category_name = cat2?.name || category_name;
+      if (cat2) category_name = cat2.name;
     }
   }
 
