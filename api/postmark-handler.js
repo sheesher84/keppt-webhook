@@ -11,7 +11,7 @@ export default async function handler(req, res) {
   }
 
   const { From, Subject, TextBody, HtmlBody, MessageID } = req.body;
-  const body = TextBody || HtmlBody || '';
+  const body = (TextBody || HtmlBody || '').replace(/\r/g, '');
   const receivedAt = new Date();
 
   // 1) Parse total_amount
@@ -41,35 +41,47 @@ export default async function handler(req, res) {
     ? categoryLineMatch[1].trim()
     : 'Other';
 
-  // 5) Parse form of payment
-  const paymentMatch = /Payment Method[:\-]?\s*([A-Za-z &]+)/i.exec(body);
-  const form_of_payment = paymentMatch
-    ? paymentMatch[1].trim()
-    : null;
+  // 5) Detect Card vs Cash & extract masked-card info
+  let form_of_payment = null;
+  let card_type        = null;
+  let card_last4       = null;
 
-  // 6) Parse card type (Visa, Mastercard, AMEX)
-  const cardTypeMatch = /\b(Visa|Mastercard|AMEX|American Express)\b/i.exec(body);
-  const card_type = cardTypeMatch
-    ? cardTypeMatch[1].trim()
-    : null;
+  // a) Try masked-card line, e.g. "VISA xxxxxxxxxx1234" or "MC xxxxxx5678"
+  const cardMatch = /([A-Za-z]{2,})\s+x+(\d{4})/i.exec(body);
+  if (cardMatch) {
+    const rawType = cardMatch[1].toLowerCase();
+    // Normalize card type
+    if (/^(mc|mastercard)$/i.test(rawType)) {
+      card_type = 'MasterCard';
+    } else if (/^visa$/i.test(rawType)) {
+      card_type = 'Visa';
+    } else if (/^(amex|american express)$/i.test(rawType)) {
+      card_type = 'AMEX';
+    } else {
+      // Any other rawType, title-case it
+      card_type = rawType[0].toUpperCase() + rawType.slice(1).toLowerCase();
+    }
+    card_last4      = cardMatch[2];
+    form_of_payment = 'Card';
+  }
 
-  // 7) Parse last 4 digits
-  const last4Match = /(ending in|last 4)[^\d]*(\d{4})/i.exec(body);
-  const card_last4 = last4Match
-    ? last4Match[2]
-    : null;
+  // b) Fallback: detect cash
+  else if (/cash/i.test(body)) {
+    form_of_payment = 'Cash';
+  }
 
-  // 8) Lookup category_id from categories table
+  // c) No explicit payment found, leave null
+
+  // 6) Lookup category_id from categories table
   let category_id = null;
-  if (category_name) {
-    const { data: cat, error: catErr } = await supabase
+  {
+    const { data: cat } = await supabase
       .from('categories')
       .select('id')
       .eq('name', category_name)
       .maybeSingle();
     if (cat) category_id = cat.id;
   }
-  // fallback to 'Other' category id
   if (!category_id) {
     const { data: otherCat } = await supabase
       .from('categories')
@@ -79,7 +91,7 @@ export default async function handler(req, res) {
     category_id = otherCat?.id || null;
   }
 
-  // 9) Insert into Supabase
+  // 7) Insert into Supabase
   const { error } = await supabase
     .from('receipts')
     .insert([{
@@ -107,4 +119,3 @@ export default async function handler(req, res) {
 
   return res.status(200).json({ message: 'Email processed successfully' });
 }
-
