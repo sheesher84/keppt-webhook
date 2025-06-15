@@ -14,20 +14,36 @@ export default async function handler(req, res) {
   const body = (TextBody || HtmlBody || '').replace(/\r/g, '');
   const receivedAt = new Date();
 
-  // 1) Parse total_amount (allowing optional decimals)
+  // 1) Parse total_amount (allow optional decimals)
   const rawAmtMatch = /\$[\d,]+(?:\.\d{1,2})?/.exec(body)?.[0] || null;
   const total_amount = rawAmtMatch
     ? parseFloat(rawAmtMatch.replace(/[$,]/g, ''))
     : null;
 
-  // 2) Parse vendor
+  // 2) Smart vendor detection
   const purchaseMatch   = /purchase from\s+([A-Za-z0-9 &]+)/i.exec(body);
   const vendorLineMatch = /Vendor:\s*([^\.\n]+)/i.exec(body);
-  const vendor = purchaseMatch
-    ? purchaseMatch[1].trim()
-    : vendorLineMatch
-    ? vendorLineMatch[1].trim()
-    : From?.split('@')[1]?.split('.')[0] || null;
+  const fromDomain      = From?.split('@')[1]?.toLowerCase() || '';
+  let vendor;
+
+  if (purchaseMatch) {
+    vendor = purchaseMatch[1].trim();
+  } else if (vendorLineMatch) {
+    vendor = vendorLineMatch[1].trim();
+  } else if (fromDomain.includes('amazon.')) {
+    vendor = 'Amazon';
+  } else if (fromDomain.includes('lyft.')) {
+    vendor = 'Lyft';
+  } else if (
+    fromDomain.includes('icloud.') ||
+    fromDomain.includes('me.') ||
+    fromDomain.includes('mac.')
+  ) {
+    vendor = 'Apple';
+  } else {
+    // fallback: first segment of domain
+    vendor = fromDomain.split('.')[0] || null;
+  }
 
   // 3) Parse order_date
   const dateMatch = /\b([A-Za-z]+ \d{1,2}, \d{4})\b/.exec(body)?.[1] || null;
@@ -40,10 +56,10 @@ export default async function handler(req, res) {
   const cardMatch = /([A-Za-z]{2,})\s+x+(\d{4})/i.exec(body);
   if (cardMatch) {
     const rawType = cardMatch[1];
-    if (/^(mc|mastercard)$/i.test(rawType))           card_type = 'MasterCard';
-    else if (/^visa$/i.test(rawType))                 card_type = 'Visa';
+    if (/^(mc|mastercard)$/i.test(rawType))       card_type = 'MasterCard';
+    else if (/^visa$/i.test(rawType))             card_type = 'Visa';
     else if (/^(amex|american express)$/i.test(rawType)) card_type = 'AMEX';
-    else                                             card_type = rawType;
+    else                                         card_type = rawType;
     card_last4      = cardMatch[2];
     form_of_payment = 'Card';
   } else if (/cash/i.test(body)) {
@@ -66,7 +82,7 @@ export default async function handler(req, res) {
     if (cat) category_id = cat.id;
   }
 
-  // 5b) Try vendor_categories lookup if still no ID
+  // 5b) vendor_categories lookup
   if (!category_id && vendor) {
     const { data: vc } = await supabase
       .from('vendor_categories')
@@ -75,14 +91,13 @@ export default async function handler(req, res) {
       .limit(1)
       .maybeSingle();
     if (vc) {
-      category_id   = vc.category_id;
-      // Fetch its name too
+      category_id = vc.category_id;
       const { data: cat2 } = await supabase
         .from('categories')
         .select('name')
         .eq('id', category_id)
         .maybeSingle();
-      category_name = cat2?.name || null;
+      category_name = cat2?.name || category_name;
     }
   }
 
