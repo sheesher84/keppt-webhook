@@ -14,16 +14,16 @@ export default async function handler(req, res) {
   const body = (TextBody || HtmlBody || '').replace(/\r/g, '');
   const receivedAt = new Date();
 
-  // 1) Parse total_amount (allow optional decimals)
+  // 1) Parse total_amount (allow optional decimals or whole dollars)
   const rawAmtMatch = /\$[\d,]+(?:\.\d{1,2})?/.exec(body)?.[0] || null;
   const total_amount = rawAmtMatch
     ? parseFloat(rawAmtMatch.replace(/[$,]/g, ''))
     : null;
 
-  // 2) Vendor detection: Subject → “purchase from” → body Vendor: → domain
+  // 2) Generic vendor detection
   let vendor = null;
 
-  // 2a) Try merchant name in Subject (e.g., "Amazon.com Order Confirmation")
+  // 2a) Try merchant name in Subject (strip common suffixes)
   if (Subject) {
     const subjMatch = /^(.+?)(?: order| receipt| confirmation| -)/i.exec(Subject);
     if (subjMatch) {
@@ -34,27 +34,23 @@ export default async function handler(req, res) {
   // 2b) Fallback to "purchase from X" in body
   if (!vendor) {
     const purchaseMatch = /purchase from\s+([A-Za-z0-9 &\.]+)/i.exec(body);
-    if (purchaseMatch) vendor = purchaseMatch[1].trim();
+    if (purchaseMatch) {
+      vendor = purchaseMatch[1].trim();
+    }
   }
 
-  // 2c) Fallback to "Vendor: X"
+  // 2c) Fallback to "Vendor: X" in body
   if (!vendor) {
     const vendorLineMatch = /Vendor:\s*([^\.\n]+)/i.exec(body);
-    if (vendorLineMatch) vendor = vendorLineMatch[1].trim();
+    if (vendorLineMatch) {
+      vendor = vendorLineMatch[1].trim();
+    }
   }
 
-  // 2d) Final fallback to known domains
+  // 2d) Final fallback: first segment of the From domain
   if (!vendor && From) {
     const domain = From.split('@')[1].toLowerCase();
-    if (domain.includes('amazon.')) {
-      vendor = 'Amazon';
-    } else if (domain.includes('lyft.')) {
-      vendor = 'Lyft';
-    } else if (/(?:icloud|me|mac)\./.test(domain)) {
-      vendor = 'Apple';
-    } else {
-      vendor = domain.split('.')[0];
-    }
+    vendor = domain.split('.')[0];
   }
 
   // 3) Parse order_date
@@ -63,22 +59,22 @@ export default async function handler(req, res) {
     ? new Date(dateMatch).toISOString().split('T')[0]
     : null;
 
-  // 4) Parse payment info
+  // 4) Parse payment info (mask ‘x’ or ‘*’ then 4 digits)
   let form_of_payment = null, card_type = null, card_last4 = null;
-  const cardMatch = /([A-Za-z]{2,})\s+x+(\d{4})/i.exec(body);
+  const cardMatch = /([A-Za-z]{2,})\s+[x\*]+(\d{4})/i.exec(body);
   if (cardMatch) {
     const rawType = cardMatch[1];
-    if (/^(mc|mastercard)$/i.test(rawType))       card_type = 'MasterCard';
-    else if (/^visa$/i.test(rawType))             card_type = 'Visa';
+    if (/^(mc|mastercard)$/i.test(rawType))         card_type = 'MasterCard';
+    else if (/^visa$/i.test(rawType))               card_type = 'Visa';
     else if (/^(amex|american express)$/i.test(rawType)) card_type = 'AMEX';
-    else                                         card_type = rawType;
+    else                                           card_type = rawType;
     card_last4      = cardMatch[2];
     form_of_payment = 'Card';
   } else if (/cash/i.test(body)) {
     form_of_payment = 'Cash';
   }
 
-  // 5) Determine category via DB lookups
+  // 5) Determine category via DB lookups only
   let category_name = null;
   let category_id   = null;
 
