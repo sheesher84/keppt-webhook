@@ -14,13 +14,13 @@ export default async function handler(req, res) {
   const body = (TextBody || HtmlBody || '').replace(/\r/g, '');
   const receivedAt = new Date();
 
-  // 1) Parse total_amount
-  const rawAmtMatch = /\$[\d,]+\.\d{2}/.exec(body)?.[0] || null;
-  const total_amount = rawAmtMatch
-    ? parseFloat(rawAmtMatch.replace(/[$,]/g, ''))
+  // 1) total_amount
+  const rawAmt = /\$[\d,]+\.\d{2}/.exec(body)?.[0] || null;
+  const total_amount = rawAmt
+    ? parseFloat(rawAmt.replace(/[$,]/g, ''))
     : null;
 
-  // 2) Parse merchant/vendor
+  // 2) vendor
   const purchaseMatch   = /purchase from\s+([A-Za-z0-9 &]+)/i.exec(body);
   const vendorLineMatch = /Vendor:\s*([^\.\n]+)/i.exec(body);
   const vendor = purchaseMatch
@@ -29,69 +29,75 @@ export default async function handler(req, res) {
     ? vendorLineMatch[1].trim()
     : From?.split('@')[1]?.split('.')[0] || null;
 
-  // 3) Parse order_date
+  // 3) order_date
   const dateMatch = /\b([A-Za-z]+ \d{1,2}, \d{4})\b/.exec(body)?.[1] || null;
   const order_date = dateMatch
     ? new Date(dateMatch).toISOString().split('T')[0]
     : null;
 
-  // 4) Parse category name (fallback to 'Other')
-  const categoryLineMatch = /Category:\s*([^\.\n]+)/i.exec(body);
-  const category_name = categoryLineMatch
-    ? categoryLineMatch[1].trim()
-    : 'Other';
-
-  // 5) Detect Card vs Cash & extract masked-card info
-  let form_of_payment = null;
-  let card_type        = null;
-  let card_last4       = null;
-
-  // a) Try masked-card line, e.g. "VISA xxxxxxxxxx1234" or "MC xxxxxx5678"
+  // 4) form_of_payment, card_type & card_last4 (as before)
+  let form_of_payment = null, card_type = null, card_last4 = null;
   const cardMatch = /([A-Za-z]{2,})\s+x+(\d{4})/i.exec(body);
   if (cardMatch) {
-    const rawType = cardMatch[1].toLowerCase();
-    // Normalize card type
-    if (/^(mc|mastercard)$/i.test(rawType)) {
-      card_type = 'MasterCard';
-    } else if (/^visa$/i.test(rawType)) {
-      card_type = 'Visa';
-    } else if (/^(amex|american express)$/i.test(rawType)) {
-      card_type = 'AMEX';
-    } else {
-      // Any other rawType, title-case it
-      card_type = rawType[0].toUpperCase() + rawType.slice(1).toLowerCase();
-    }
+    const rawType = cardMatch[1];
+    if (/^(mc|mastercard)$/i.test(rawType))       card_type = 'MasterCard';
+    else if (/^visa$/i.test(rawType))             card_type = 'Visa';
+    else if (/^(amex|american express)$/i.test(rawType)) card_type = 'AMEX';
+    else                                         card_type = rawType;
     card_last4      = cardMatch[2];
     form_of_payment = 'Card';
-  }
-
-  // b) Fallback: detect cash
-  else if (/cash/i.test(body)) {
+  } else if (/cash/i.test(body)) {
     form_of_payment = 'Cash';
   }
 
-  // c) No explicit payment found, leave null
+  // 5) Determine category_id
 
-  // 6) Lookup category_id from categories table
+  // 5a) First, explicit “Category:” line
+  let category_name = null;
+  const catHdr = /Category:\s*([^\.\n]+)/i.exec(body);
+  if (catHdr) {
+    category_name = catHdr[1].trim();
+  }
+
+  // 5b) Next, try vendor_categories DB lookup
   let category_id = null;
-  {
+  if (!category_id && vendor) {
+    const { data: vc } = await supabase
+      .from('vendor_categories')
+      .select('category_id')
+      .ilike('vendor_pattern', `%${vendor.toLowerCase()}%`)
+      .limit(1)
+      .single();
+    if (vc) {
+      category_id = vc.category_id;
+      // optionally set category_name via join but this isn't needed for insertion
+    }
+  }
+
+  // 5c) Next, if we got a category_name from the header but no ID yet, look it up
+  if (category_name && !category_id) {
     const { data: cat } = await supabase
       .from('categories')
       .select('id')
       .eq('name', category_name)
       .maybeSingle();
-    if (cat) category_id = cat.id;
+    if (cat) {
+      category_id = cat.id;
+    }
   }
+
+  // 5d) Fallback to “Other”
   if (!category_id) {
-    const { data: otherCat } = await supabase
+    category_name = category_name || 'Other';
+    const { data: other } = await supabase
       .from('categories')
       .select('id')
       .eq('name', 'Other')
       .maybeSingle();
-    category_id = otherCat?.id || null;
+    category_id = other?.id || null;
   }
 
-  // 7) Insert into Supabase
+  // 6) Insert
   const { error } = await supabase
     .from('receipts')
     .insert([{
