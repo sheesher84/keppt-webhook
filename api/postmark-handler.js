@@ -10,174 +10,155 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
-  // 1) Pull in both text and HTML, strip tags from HTML, preserve newlines
-  const textBody = req.body.TextBody || '';
-  const htmlBody = (req.body.HtmlBody || '')
-    .replace(/<script[\s\S]*?<\/script>/gi, '')
-    .replace(/<\/?[^>]+(>|$)/g, ' ');
-  const rawBody = (textBody + '\n' + htmlBody).replace(/\r/g, '\n');
-  const lines = rawBody
-    .split(/\n/)
-    .map(l => l.trim())
-    .filter(l => l.length);
+  const { From, Subject, TextBody, HtmlBody, MessageID } = req.body;
+  // combine & normalize bodies
+  const html      = HtmlBody || '';
+  const text      = TextBody || '';
+  const body      = (text || html).replace(/\r/g, '');
   const receivedAt = new Date();
 
-  // 2) Parse total_amount by scanning bottom-up for “Total Tender” or “Total”
-  let total_amount = null;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const ln = lines[i];
-    let m = ln.match(/^Total Tender[\s:]*\$?([\d,]+(?:\.\d{1,2})?)/i);
-    if (m) {
-      total_amount = parseFloat(m[1].replace(/,/g, ''));
-      break;
-    }
-    m = ln.match(/^Total[\s:]*\$?([\d,]+(?:\.\d{1,2})?)/i);
-    if (m && !/^Total (Tax|Discount)/i.test(ln)) {
-      total_amount = parseFloat(m[1].replace(/,/g, ''));
-      break;
-    }
-  }
-  if (total_amount === null) {
-    // Fallback: last decimal number
-    const allNums = rawBody.match(/[\d,]+\.\d{2}/g);
-    if (allNums?.length) {
-      total_amount = parseFloat(allNums[allNums.length - 1].replace(/,/g, ''));
-    }
-  }
+  //
+  // 1) Parse total_amount (handles $95 or $95.00)
+  //
+  const rawAmt = /\$[\d,]+(?:\.\d{2})?/.exec(body)?.[0] || null;
+  const total_amount = rawAmt
+    ? parseFloat(rawAmt.replace(/[$,]/g, ''))
+    : null;
 
-  // 3) Vendor detection (no hard-codes)
+  //
+  // 2) Generic vendor detection
+  //
   let vendor = null;
-  // 3a) First line, before “-”
-  let m = lines[0].match(/^([A-Za-z0-9 &]+)\s*-/);
-  if (m) vendor = m[1].trim();
-  // 3b) “from X” in subject
-  if (!vendor && req.body.Subject) {
-    m = req.body.Subject.match(/from\s+([A-Za-z0-9 &]+)/i);
+
+  // 2a) “from X” in the Subject
+  if (Subject) {
+    const m = /from\s+([A-Za-z0-9 &]+)/i.exec(Subject);
     if (m) vendor = m[1].trim();
-  }
-  // 3c) “purchase from X” in body
-  if (!vendor) {
-    m = rawBody.match(/purchase from\s+([A-Za-z0-9 &\.]+)/i);
-    if (m) vendor = m[1].trim();
-  }
-  // 3d) “Vendor: X”
-  if (!vendor) {
-    m = rawBody.match(/Vendor:\s*([^\.\n]+)/i);
-    if (m) vendor = m[1].trim();
-  }
-  // 3e) <img alt="…">
-  if (!vendor && htmlBody) {
-    m = htmlBody.match(/<img[^>]+alt="([^"]+)"/i);
-    if (m) vendor = m[1].trim();
-  }
-  // 3f) fallback to second-level domain
-  if (!vendor && req.body.From) {
-    const parts = req.body.From.split('@')[1].toLowerCase().split('.');
-    vendor = parts.length > 1 ? parts[parts.length - 2] : parts[0];
   }
 
-  // 4) Parse order_date (MM/DD/YYYY or “Month D, YYYY”)
-  let order_date = null;
-  m = rawBody.match(/\b([A-Za-z]+ \d{1,2}, \d{4})\b/);
-  if (m) {
-    order_date = new Date(m[1]).toISOString().split('T')[0];
-  } else {
-    m = rawBody.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-    if (m) {
-      const [, mm, dd, yyyy] = m;
-      order_date = `${yyyy}-${mm.padStart(2,'0')}-${dd.padStart(2,'0')}`;
-    }
+  // 2b) “purchase from X” in the body
+  if (!vendor) {
+    const m = /purchase from\s+([A-Za-z0-9 &\.]+)/i.exec(body);
+    if (m) vendor = m[1].trim();
   }
 
-  // 5) Parse payment info & “contactless” fallback
+  // 2c) “Vendor: X” line in the body
+  if (!vendor) {
+    const m = /Vendor:\s*([^\.\n]+)/i.exec(body);
+    if (m) vendor = m[1].trim();
+  }
+
+  // 2d) Logo <img alt="…"> in the HTML
+  if (!vendor && html) {
+    const m = /<img[^>]+alt="([^"]+)"/i.exec(html);
+    if (m) vendor = m[1].trim();
+  }
+
+  // 2e) Fallback: second-level domain (e.g. “lyft” from “post.lyft.com”)
+  if (!vendor && From) {
+    const parts = From.split('@')[1].toLowerCase().split('.');
+    vendor = parts.length > 1
+      ? parts[parts.length - 2]
+      : parts[0];
+  }
+
+  //
+  // 3) Parse order_date (e.g. “June 3, 2025” → “2025-06-03”)
+  //
+  const dateMatch = /\b([A-Za-z]+ \d{1,2}, \d{4})\b/.exec(body)?.[1] || null;
+  const order_date = dateMatch
+    ? new Date(dateMatch).toISOString().split('T')[0]
+    : null;
+
+  //
+  // 4) Parse payment info (cards or cash)
+  //
   let form_of_payment = null, card_type = null, card_last4 = null;
-  const clean = rawBody.replace(/&bull;|&#8226;/g, '•');
-  // 5a) Look for “Account:” and a card brand
-  const acctMatch  = clean.match(/Account:\s*([x\*•\d]+)/i);
-  const brandMatch = (clean + ' ' + (req.body.Subject||'')).match(
-    /\b(Visa|MasterCard|Amex|American Express)\b/i
-  );
-  if (acctMatch && brandMatch) {
+  const clean = body
+    .replace(/&bull;/gi, '•')
+    .replace(/&#8226;/g, '•');
+
+  const cardMatch = /([A-Za-z]{2,})\s+[x\*•]+(\d{4})/i.exec(clean);
+  if (cardMatch) {
+    const raw = cardMatch[1];
+    if (/^(mc|mastercard)$/i.test(raw))       card_type = 'MasterCard';
+    else if (/^visa$/i.test(raw))             card_type = 'Visa';
+    else if (/^(amex|american express)$/i.test(raw)) card_type = 'AMEX';
+    else                                       card_type = raw;
+    card_last4      = cardMatch[2];
     form_of_payment = 'Card';
-    const rawBrand = brandMatch[1].toLowerCase();
-    if (/^(mc|mastercard)$/i.test(rawBrand))       card_type = 'MasterCard';
-    else if (/^visa$/i.test(rawBrand))             card_type = 'Visa';
-    else if (/^(amex|american express)$/i.test(rawBrand)) card_type = 'AMEX';
-    else                                           card_type = brandMatch[1];
-    card_last4 = acctMatch[1].replace(/[^0-9]/g, '').slice(-4);
-  } else {
-    // 5b) Generic masked fallback
-    m = clean.match(/([A-Za-z]{2,})\s+[x\*•]+(\d{4})/i);
-    if (m) {
-      form_of_payment = 'Card';
-      const rawBrand = m[1].toLowerCase();
-      if (/^(mc|mastercard)$/i.test(rawBrand))       card_type = 'MasterCard';
-      else if (/^visa$/i.test(rawBrand))             card_type = 'Visa';
-      else if (/^(amex|american express)$/i.test(rawBrand)) card_type = 'AMEX';
-      else                                           card_type = m[1];
-      card_last4 = m[2];
-    }
-    // 5c) “contactless” implies card
-    else if (/contactless/i.test(clean)) {
-      form_of_payment = 'Card';
-    }
-    // 5d) cash
-    else if (/cash/i.test(clean)) {
-      form_of_payment = 'Cash';
-    }
+  } else if (/cash/i.test(body)) {
+    form_of_payment = 'Cash';
   }
 
-  // 6) Category lookup in your DB
+  //
+  // 5) Category lookup via DB tables only
+  //
   let category_name = null, category_id = null;
-  // 6a) Explicit “Category:” header
-  m = rawBody.match(/Category:\s*([^\.\n]+)/i);
-  if (m) {
-    category_name = m[1].trim();
+
+  // 5a) Explicit “Category:” header
+  const catHdr = /Category:\s*([^\.\n]+)/i.exec(body);
+  if (catHdr) {
+    category_name = catHdr[1].trim();
     const { data: cat } = await supabase
-      .from('categories').select('id').eq('name', category_name).maybeSingle();
+      .from('categories')
+      .select('id')
+      .eq('name', category_name)
+      .maybeSingle();
     if (cat) category_id = cat.id;
   }
-  // 6b) vendor_categories mapping
+
+  // 5b) vendor_categories mapping
   if (!category_id && vendor) {
     const { data: vc } = await supabase
       .from('vendor_categories')
       .select('category_id')
       .ilike('vendor_pattern', `%${vendor.toLowerCase()}%`)
-      .limit(1).maybeSingle();
+      .limit(1)
+      .maybeSingle();
     if (vc) {
       category_id = vc.category_id;
       const { data: cat2 } = await supabase
-        .from('categories').select('name').eq('id', category_id).maybeSingle();
+        .from('categories')
+        .select('name')
+        .eq('id', category_id)
+        .maybeSingle();
       if (cat2) category_name = cat2.name;
     }
   }
-  // 6c) fallback to “Other”
+
+  // 5c) Default to “Other”
   if (!category_id) {
     category_name ||= 'Other';
     const { data: other } = await supabase
-      .from('categories').select('id').eq('name', 'Other').maybeSingle();
+      .from('categories')
+      .select('id')
+      .eq('name', 'Other')
+      .maybeSingle();
     category_id = other?.id || null;
   }
 
-  // 7) Insert the parsed receipt
+  //
+  // 6) Insert into receipts
+  //
   const { error } = await supabase
     .from('receipts')
     .insert([{
-      email_sender:  req.body.From     || null,
-      subject:       req.body.Subject  || null,
-      body_text:     textBody          || null,
-      body_html:     htmlBody          || null,
+      email_sender:   From || null,
+      subject:        Subject || null,
+      body_text:      TextBody || null,
+      body_html:      HtmlBody || null,
       total_amount,
       vendor,
-      vendor_name:   vendor,
+      vendor_name:    vendor,
       order_date,
-      category:      category_name,
+      category:       category_name,
       category_id,
       form_of_payment,
       card_type,
       card_last4,
-      message_id:    req.body.MessageID || null,
-      received_at:   receivedAt
+      message_id:     MessageID || null,
+      received_at:    receivedAt
     }]);
 
   if (error) {
