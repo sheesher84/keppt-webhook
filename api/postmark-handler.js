@@ -11,26 +11,28 @@ export default async function handler(req, res) {
   }
 
   const { From, Subject, TextBody, HtmlBody, MessageID } = req.body;
-  const rawBody    = TextBody || HtmlBody || '';             // preserve newlines
+
+  // Preserve newlines for amount/date, collapse whitespace for vendor/payment
+  const rawBody    = TextBody || HtmlBody || '';  
   const html       = HtmlBody || '';
   const text       = TextBody || '';
   const normalized = (text || html).replace(/\s+/g, ' ').trim();
   const receivedAt = new Date();
 
   //
-  // 1) Parse total_amount from rawBody (with newlines)
+  // 1) Parse total_amount from rawBody
   //
   let total_amount = null;
   let m = /^Total Tender\s*\$?([\d,]+(?:\.\d{1,2})?)/im.exec(rawBody);
   if (m) {
     total_amount = parseFloat(m[1].replace(/,/g, ''));
   } else {
-    m = /^Total\s+(?!Tax|Discount)\$?([\d,]+(?:\.\d{1,2})?)/im.exec(rawBody);
+    m = /(?:\b|^)Total\s+(?!Tax|Discount)\$?([\d,]+(?:\.\d{1,2})?)/im.exec(rawBody);
     if (m) {
       total_amount = parseFloat(m[1].replace(/,/g, ''));
     } else {
       const all = rawBody.match(/\$[\d,]+(?:\.\d{1,2})?/g);
-      if (all && all.length) {
+      if (all?.length) {
         total_amount = parseFloat(all[all.length - 1].replace(/[$,]/g, ''));
       }
     }
@@ -40,37 +42,31 @@ export default async function handler(req, res) {
   // 2) Generic vendor detection
   //
   let vendor = null;
-
   // 2a) First line before “-”
   const firstLine = rawBody.split('\n')[0] || '';
   m = /^([A-Za-z0-9 &]+)\s*-/ .exec(firstLine);
   if (m) vendor = m[1].trim();
-
   // 2b) “from X” in Subject
   if (!vendor && Subject) {
     m = /from\s+([A-Za-z0-9 &]+)/i.exec(Subject);
     if (m) vendor = m[1].trim();
   }
-
-  // 2c) “purchase from X” in normalized body
+  // 2c) “purchase from X”
   if (!vendor) {
     m = /purchase from\s+([A-Za-z0-9 &\.]+)/i.exec(normalized);
     if (m) vendor = m[1].trim();
   }
-
-  // 2d) “Vendor: X” in normalized body
+  // 2d) “Vendor: X”
   if (!vendor) {
     m = /Vendor:\s*([^\.\n]+)/i.exec(normalized);
     if (m) vendor = m[1].trim();
   }
-
   // 2e) <img alt="…"> in HTML
   if (!vendor && html) {
     m = /<img[^>]+alt="([^"]+)"/i.exec(html);
     if (m) vendor = m[1].trim();
   }
-
-  // 2f) Fallback to second-level domain
+  // 2f) fallback to second-level domain
   if (!vendor && From) {
     const parts = From.split('@')[1].toLowerCase().split('.');
     vendor = parts.length > 1 ? parts[parts.length - 2] : parts[0];
@@ -87,7 +83,7 @@ export default async function handler(req, res) {
     m = /(\d{1,2})\/(\d{1,2})\/(\d{4})/.exec(rawBody);
     if (m) {
       const [, mm, dd, yyyy] = m;
-      order_date = `${yyyy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`;
+      order_date = `${yyyy}-${mm.padStart(2,'0')}-${dd.padStart(2,'0')}`;
     }
   }
 
@@ -97,9 +93,11 @@ export default async function handler(req, res) {
   let form_of_payment = null, card_type = null, card_last4 = null;
   const clean = normalized.replace(/&bull;|&#8226;/g, '•');
 
-  // 4a) Brand + “Account:”
+  // 4a) Brand + “Account:” line
   const acct  = /Account:\s*([x\*•\d]+)/i.exec(clean);
-  const brand = /\b(Visa|MasterCard|AMEX|American Express)\b/i.exec(clean + ' ' + (Subject || ''));
+  const brand = /\b(Visa|MasterCard|AMEX|American Express)\b/i.exec(
+    clean + ' ' + (Subject||'')
+  );
   if (acct && brand) {
     form_of_payment = 'Card';
     const raw = brand[1];
@@ -109,7 +107,7 @@ export default async function handler(req, res) {
     else                                       card_type = raw;
     card_last4 = acct[1].replace(/[^0-9]/g, '').slice(-4);
   } else {
-    // 4b) Generic masked pattern
+    // 4b) Generic masked fallback
     m = /([A-Za-z]{2,})\s+[x\*•]+(\d{4})/i.exec(clean);
     if (m) {
       form_of_payment = 'Card';
@@ -131,19 +129,17 @@ export default async function handler(req, res) {
   }
 
   //
-  // 5) Category lookup via DB only
+  // 5) Category lookup (entirely in DB)
   //
   let category_name = null, category_id = null;
-
-  // 5a) Explicit “Category:” header
+  // 5a) “Category:” header
   m = /Category:\s*([^\.\n]+)/i.exec(normalized);
   if (m) {
     category_name = m[1].trim();
     const { data: cat } = await supabase
-      .from('categories').select('id').eq('name', category_name).maybeSingle();
+      .from('categories').select('id').eq('name',category_name).maybeSingle();
     if (cat) category_id = cat.id;
   }
-
   // 5b) vendor_categories mapping
   if (!category_id && vendor) {
     const { data: vc } = await supabase
@@ -154,40 +150,39 @@ export default async function handler(req, res) {
     if (vc) {
       category_id = vc.category_id;
       const { data: cat2 } = await supabase
-        .from('categories').select('name').eq('id', category_id).maybeSingle();
+        .from('categories').select('name').eq('id',category_id).maybeSingle();
       if (cat2) category_name = cat2.name;
     }
   }
-
   // 5c) Fallback to “Other”
   if (!category_id) {
     category_name ||= 'Other';
     const { data: other } = await supabase
-      .from('categories').select('id').eq('name', 'Other').maybeSingle();
+      .from('categories').select('id').eq('name','Other').maybeSingle();
     category_id = other?.id || null;
   }
 
   //
-  // 6) Insert into receipts
+  // 6) Insert receipt
   //
   const { error } = await supabase
     .from('receipts')
     .insert([{
-      email_sender:   From || null,
-      subject:        Subject || null,
-      body_text:      TextBody || null,
-      body_html:      HtmlBody || null,
+      email_sender:  From || null,
+      subject:       Subject || null,
+      body_text:     TextBody || null,
+      body_html:     HtmlBody || null,
       total_amount,
       vendor,
-      vendor_name:    vendor,
+      vendor_name:   vendor,
       order_date,
-      category:       category_name,
+      category:      category_name,
       category_id,
       form_of_payment,
       card_type,
       card_last4,
-      message_id:     MessageID || null,
-      received_at:    receivedAt
+      message_id:    MessageID||null,
+      received_at:   receivedAt
     }]);
 
   if (error) {
