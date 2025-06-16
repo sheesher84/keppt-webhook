@@ -11,83 +11,93 @@ export default async function handler(req, res) {
   }
 
   const { From, Subject, TextBody, HtmlBody, MessageID } = req.body;
-  const body = (TextBody || HtmlBody || '').replace(/\r/g, '');
+  // combine & normalize bodies
+  const html = HtmlBody || '';
+  const text = TextBody || '';
+  const body = (text || html).replace(/\r/g, '');
   const receivedAt = new Date();
 
-  // 1) Parse total_amount ($95 or $95.00)
-  const rawAmtMatch = /\$[\d,]+(?:\.\d{1,2})?/.exec(body)?.[0] || null;
-  const total_amount = rawAmtMatch
-    ? parseFloat(rawAmtMatch.replace(/[$,]/g, ''))
+  //
+  // 1) Parse total_amount (handles $95 or $95.00)
+  //
+  const rawAmt = /\$[\d,]+(?:\.\d{1,2})?/.exec(body)?.[0] || null;
+  const total_amount = rawAmt
+    ? parseFloat(rawAmt.replace(/[$,]/g, ''))
     : null;
 
+  //
   // 2) Generic vendor detection
+  //
   let vendor = null;
 
-  // 2a) Subject “from X” (e.g. “Your receipt from Apple”)
+  // 2a) “from X” in the Subject (e.g. “Your receipt from Lyft”)
   if (Subject) {
-    const subjFrom = /from\s+([A-Za-z0-9 &]+)/i.exec(Subject);
-    if (subjFrom) {
-      vendor = subjFrom[1].trim();
-    }
+    const m = /from\s+([A-Za-z0-9 &]+)/i.exec(Subject);
+    if (m) vendor = m[1].trim();
   }
 
-  // 2b) “purchase from X” in body
+  // 2b) “purchase from X” in the body
   if (!vendor) {
-    const purchaseMatch = /purchase from\s+([A-Za-z0-9 &\.]+)/i.exec(body);
-    if (purchaseMatch) {
-      vendor = purchaseMatch[1].trim();
-    }
+    const m = /purchase from\s+([A-Za-z0-9 &\.]+)/i.exec(body);
+    if (m) vendor = m[1].trim();
   }
 
-  // 2c) “Vendor: X” line in body
+  // 2c) “Vendor: X” line in the body
   if (!vendor) {
-    const vendorLine = /Vendor:\s*([^\.\n]+)/i.exec(body);
-    if (vendorLine) {
-      vendor = vendorLine[1].trim();
-    }
+    const m = /Vendor:\s*([^\.\n]+)/i.exec(body);
+    if (m) vendor = m[1].trim();
   }
 
-  // 2d) Final fallback: first segment of the domain
+  // 2d) Logo <img alt="…"> in the HTML
+  if (!vendor && html) {
+    const m = /<img[^>]+alt="([^"]+)"/i.exec(html);
+    if (m) vendor = m[1].trim();
+  }
+
+  // 2e) Final fallback: second‐level domain (e.g. “lyft” from “post.lyft.com”)
   if (!vendor && From) {
-    vendor = From.split('@')[1].split('.')[0];
+    const parts = From.split('@')[1].toLowerCase().split('.');
+    vendor = parts.length > 1
+      ? parts[parts.length - 2]
+      : parts[0];
   }
 
-  // 3) Parse order_date (“June 3, 2025” → “2025-06-03”)
+  //
+  // 3) Parse order_date (e.g. “June 3, 2025” → “2025-06-03”)
+  //
   const dateMatch = /\b([A-Za-z]+ \d{1,2}, \d{4})\b/.exec(body)?.[1] || null;
   const order_date = dateMatch
     ? new Date(dateMatch).toISOString().split('T')[0]
     : null;
 
-  // 4) Parse payment info (bullets •, x, or *)
+  //
+  // 4) Parse payment info (cards or cash)
+  //
   let form_of_payment = null;
   let card_type       = null;
   let card_last4      = null;
 
-  const cardMatch = /([A-Za-z]{2,})\s+[x\*\u2022]+(\d{4})/iu.exec(body);
+  // allow • (•), * or x masks
+  const clean = body
+    .replace(/&bull;/gi, '•')
+    .replace(/&#8226;/g, '•');
+
+  const cardMatch = /([A-Za-z]{2,})\s+[x\*•]+(\d{4})/i.exec(clean);
   if (cardMatch) {
-    const rawType = cardMatch[1];
-    if (/^(mc|mastercard)$/i.test(rawType))       card_type = 'MasterCard';
-    else if (/^visa$/i.test(rawType))             card_type = 'Visa';
-    else if (/^(amex|american express)$/i.test(rawType)) card_type = 'AMEX';
-    else                                         card_type = rawType;
+    const raw = cardMatch[1];
+    if (/^(mc|mastercard)$/i.test(raw))       card_type = 'MasterCard';
+    else if (/^visa$/i.test(raw))             card_type = 'Visa';
+    else if (/^(amex|american express)$/i.test(raw)) card_type = 'AMEX';
+    else                                       card_type = raw;
     card_last4      = cardMatch[2];
     form_of_payment = 'Card';
-  } else {
-    // fallback: spot brands in subject or body
-    const brandMatch = /\b(Visa|MasterCard|AMEX|American Express)\b/i.exec(
-      body + ' ' + (Subject || '')
-    );
-    if (brandMatch) {
-      const rawType = brandMatch[1];
-      form_of_payment = 'Card';
-      if (/^(mc|mastercard)$/i.test(rawType))       card_type = 'MasterCard';
-      else if (/^visa$/i.test(rawType))             card_type = 'Visa';
-      else if (/^(amex|american express)$/i.test(rawType)) card_type = 'AMEX';
-      else                                         card_type = rawType;
-    }
+  } else if (/cash/i.test(body)) {
+    form_of_payment = 'Cash';
   }
 
-  // 5) Determine category via DB (categories + vendor_categories)
+  //
+  // 5) Category lookup via DB tables only
+  //
   let category_name = null;
   let category_id   = null;
 
@@ -103,7 +113,7 @@ export default async function handler(req, res) {
     if (cat) category_id = cat.id;
   }
 
-  // 5b) vendor_categories lookup
+  // 5b) vendor_categories mapping
   if (!category_id && vendor) {
     const { data: vc } = await supabase
       .from('vendor_categories')
@@ -122,7 +132,7 @@ export default async function handler(req, res) {
     }
   }
 
-  // 5c) Fallback to “Other”
+  // 5c) Default to “Other”
   if (!category_id) {
     category_name ||= 'Other';
     const { data: other } = await supabase
@@ -133,7 +143,9 @@ export default async function handler(req, res) {
     category_id = other?.id || null;
   }
 
+  //
   // 6) Insert into receipts
+  //
   const { error } = await supabase
     .from('receipts')
     .insert([{
