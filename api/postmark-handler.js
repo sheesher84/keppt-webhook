@@ -18,7 +18,8 @@ export default async function handler(req, res) {
   const { From, Subject, TextBody, HtmlBody, MessageID } = req.body;
   const html       = HtmlBody || '';
   const text       = TextBody || '';
-  const body       = (text || html).replace(/\r/g, '');
+  // Limit body to 5000 characters to avoid context length errors!
+  const truncatedBody = (text || html).replace(/\r/g, '').slice(0, 5000);
   const receivedAt = new Date();
 
   // --- Comprehensive prompt for expert-level parsing ---
@@ -76,117 +77,17 @@ Other Extraction Rules:
 - For receipts that use strange labels or foreign language (but English text is present), use best judgment and reasoning.
 - If you are unsure between two options for a field, pick the value with the most supporting context.
 
-Examples:
-
-Example 1:
-Email sender: do_not_reply@target.com
-Subject: Your Target eReceipt
-Body:
-Target
-Thank you for your purchase.
-Order Total: $44.90
-Paid with: MasterCard ending in 1234
-Order Date: 06/13/2025
-
-Expected JSON:
-{
-  "email_sender": "do_not_reply@target.com",
-  "subject": "Your Target eReceipt",
-  "total_amount": 44.90,
-  "vendor": "Target",
-  "order_date": "2025-06-13",
-  "form_of_payment": "Card",
-  "card_type": "MasterCard",
-  "card_last4": "1234",
-  "category": "Shopping & Retail",
-  "tracking_number": null
-}
-
-Example 2:
-Email sender: receipts@walmart.com
-Subject: Walmart Supercenter Purchase Receipt
-Body:
-Thank you for shopping at Walmart.
-Walmart Supercenter #123
-Date: 2025-06-10
-Amount Paid: $63.12
-Paid by: Visa ending in 4567
-
-Expected JSON:
-{
-  "email_sender": "receipts@walmart.com",
-  "subject": "Walmart Supercenter Purchase Receipt",
-  "total_amount": 63.12,
-  "vendor": "Walmart",
-  "order_date": "2025-06-10",
-  "form_of_payment": "Card",
-  "card_type": "Visa",
-  "card_last4": "4567",
-  "category": "Groceries",
-  "tracking_number": null
-}
-
-Example 3 (vendor in footer, complex label):
-Email sender: support@pos.com
-Subject: Receipt #0000999
-Body:
-Transaction Complete!
-Amount: $28.00
-Payment: Cash
-Date: 2025-07-12
----
-Thank you for shopping at THE FLOWER PATCH.
-
-Expected JSON:
-{
-  "email_sender": "support@pos.com",
-  "subject": "Receipt #0000999",
-  "total_amount": 28.00,
-  "vendor": "The Flower Patch",
-  "order_date": "2025-07-12",
-  "form_of_payment": "Cash",
-  "card_type": null,
-  "card_last4": null,
-  "category": "Shopping & Retail",
-  "tracking_number": null
-}
-
-Example 4 (multiple items, returns/refunds):
-Email sender: gap@receipts.com
-Subject: Your GAP Receipt
-Body:
-Thank you for shopping at GAP!
-Order Total: $55.00
-Return: $10.00
-Net Charge: $45.00
-Paid by: VISA xxxxxxxxxx1234
-Order Date: 2025-06-15
-
-Expected JSON:
-{
-  "email_sender": "gap@receipts.com",
-  "subject": "Your GAP Receipt",
-  "total_amount": 45.00,
-  "vendor": "GAP",
-  "order_date": "2025-06-15",
-  "form_of_payment": "Card",
-  "card_type": "Visa",
-  "card_last4": "1234",
-  "category": "Shopping & Retail",
-  "tracking_number": null
-}
-
 Now, extract the JSON for this receipt:
 Email sender: ${From || ""}
 Subject: ${Subject || ""}
-Body: ${body}
+Body: ${truncatedBody}
   `.trim();
 
-  // Call OpenAI and parse result
+  // --- Call OpenAI and robustly parse result ---
   let parsed = {};
   try {
     const aiRes = await openai.chat.completions.create({
-      model: "gpt-3.5-turbo",
+      model: "gpt-3.5-turbo", // Switch to 4/4o if needed and affordable
       messages: [
         { role: "system", content: "You are a world-class receipts-parsing assistant." },
         { role: "user",   content: prompt }
@@ -194,8 +95,15 @@ Body: ${body}
       max_tokens: 400
     });
 
-    const content = aiRes.choices[0]?.message?.content;
-    parsed = JSON.parse(content);
+    let content = aiRes.choices[0]?.message?.content?.trim() || "";
+
+    // Extract only the JSON object if OpenAI adds extra words!
+    let match = content.match(/{[\s\S]*}/);
+    if (match) {
+      parsed = JSON.parse(match[0]);
+    } else {
+      parsed = JSON.parse(content); // fallback (if ONLY JSON returned)
+    }
 
   } catch (err) {
     console.warn("OpenAI parsing failed, falling back to null fields:", err);
@@ -213,7 +121,7 @@ Body: ${body}
     };
   }
 
-  // Insert into receipts table using parsed fields
+  // --- Insert into receipts table using parsed fields ---
   const { error } = await supabase
     .from('receipts')
     .insert([{
