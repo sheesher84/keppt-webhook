@@ -10,123 +10,105 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-// --- Regex Helpers ---
-function extractCard(text) {
-  // Finds card type and last 4 from various formats
-  const cardRegex = /(Visa|MasterCard|Amex|American Express|Discover|MC)[^0-9]{0,15}(?:ending in|x+|\*+)?\s*?(\d{4})/i;
-  const match = cardRegex.exec(text);
-  if (match) {
-    let cardType = match[1];
-    if (cardType === 'MC') cardType = 'MasterCard';
-    if (cardType === 'Amex') cardType = 'American Express';
-    return { card_type: cardType, card_last4: match[2] };
-  }
-  return { card_type: null, card_last4: null };
-}
-
-function extractAmount(text) {
-  // Try to match the last "Total", "Amount Paid", or "Total Tendered"
-  const lines = text.split('\n');
-  let candidates = [];
-  for (let line of lines) {
-    if (
-      /(total|amount paid|total tendered|order total|payment total)/i.test(line)
-      && /\$?\s?([0-9]+([.,][0-9]{2})?)/.test(line)
-    ) {
-      const amt = line.match(/\$?\s?([0-9]+([.,][0-9]{2})?)/);
-      if (amt) candidates.push(parseFloat(amt[1].replace(',', '.')));
-    }
-  }
-  // fallback: last $xx.xx in the body
-  if (candidates.length === 0) {
-    const all = text.match(/\$([0-9]+(?:[.,][0-9]{2})?)/g);
-    if (all) {
-      let last = all[all.length - 1];
-      return parseFloat(last.replace(/[^0-9.]/g, ''));
-    }
-    // fallback: numbers like "Total 65.18"
-    const looseAmt = text.match(/total[^0-9]{1,6}([0-9]+(?:[.,][0-9]{2})?)/i);
-    if (looseAmt) return parseFloat(looseAmt[1].replace(',', '.'));
-    return null;
-  }
-  // Use the largest candidate (most likely the grand total)
-  return Math.max(...candidates);
-}
-
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
   const { From, Subject, TextBody, HtmlBody, MessageID } = req.body;
-  const textBody = TextBody || '';
-  const htmlBody = HtmlBody || '';
-  const body = (textBody || htmlBody).replace(/\r/g, '');
+  const html       = HtmlBody || '';
+  const text       = TextBody || '';
+  const body       = (text || html).replace(/\r/g, '');
   const receivedAt = new Date();
 
-  // Regex extraction
-  const regexCard = extractCard(body);
-  const regexAmount = extractAmount(body);
-
-  // LLM Prompt
+  // Force JSON only from LLM
   const prompt = `
-You are a world-class receipt-parsing assistant. Parse the following purchase receipt and extract as JSON:
-Fields: email_sender, subject, total_amount (number, no $), vendor, order_date (YYYY-MM-DD), form_of_payment ("Card" or "Cash"), card_type, card_last4, category, tracking_number.
-If missing, set as null.
+You are a world-class receipt-parsing assistant. Extract ONLY the following fields from the provided email receipt.
+- Respond ONLY with a valid JSON object and nothing else.
+- Do not include comments, explanations, or apologies.
+- If a field is missing, set it to null.
+
+JSON fields to extract:
+email_sender, subject, total_amount (number, no $ sign), vendor, order_date (YYYY-MM-DD), form_of_payment ("Card" or "Cash"), card_type ("Visa", "MasterCard", "AMEX", etc), card_last4 (4 digits), category, tracking_number
+
 Email sender: ${From || ""}
 Subject: ${Subject || ""}
 Body: ${body}
+Output ONLY the JSON object as your answer.
   `.trim();
 
-  let ai = {};
+  let parsed = {};
+  let openAIContent = '';
   try {
     const aiRes = await openai.chat.completions.create({
       model: "gpt-3.5-turbo",
       messages: [
         { role: "system", content: "You are a world-class receipts-parsing assistant." },
-        { role: "user", content: prompt }
+        { role: "user",   content: prompt }
       ],
-      max_tokens: 400
+      max_tokens: 400,
+      temperature: 0 // Less creative, more accurate
     });
-    ai = JSON.parse(aiRes.choices[0]?.message?.content);
+
+    openAIContent = aiRes.choices[0]?.message?.content?.trim();
+    console.log("OpenAI content:", openAIContent);
+    parsed = JSON.parse(openAIContent);
+
+    // Defensive: ensure every key exists
+    parsed = {
+      email_sender:   parsed.email_sender ?? (From || null),
+      subject:        parsed.subject ?? (Subject || null),
+      total_amount:   parsed.total_amount ?? null,
+      vendor:         parsed.vendor ?? null,
+      order_date:     parsed.order_date ?? null,
+      form_of_payment: parsed.form_of_payment ?? null,
+      card_type:      parsed.card_type ?? null,
+      card_last4:     parsed.card_last4 ?? null,
+      category:       parsed.category ?? null,
+      tracking_number: parsed.tracking_number ?? null
+    };
+
   } catch (err) {
     console.warn("OpenAI parsing failed, falling back to regex-only:", err);
-    ai = {};
+    console.warn("OpenAI response content was:", openAIContent);
+
+    // --- Basic regex fallback ---
+    // (Add your preferred regex parsing here, but keeping it simple for demo)
+    const amountMatch = (body.match(/\$([\d,]+\.\d{2}|\d+)/) || [])[1];
+    let amount = amountMatch ? parseFloat(amountMatch.replace(/,/g, '')) : null;
+
+    // (You can extend these with more robust patterns as needed)
+    parsed = {
+      email_sender:   From || null,
+      subject:        Subject || null,
+      total_amount:   amount,
+      vendor:         null,
+      order_date:     null,
+      form_of_payment: null,
+      card_type:      null,
+      card_last4:     null,
+      category:       null,
+      tracking_number: null
+    };
   }
 
-  // Hybrid assignment: Prefer LLM, fallback to regex, but *upvote* LLM if conflict
-  function getField(field, regexValue) {
-    if (ai[field] !== null && ai[field] !== undefined && ai[field] !== "") {
-      return ai[field];
-    }
-    return regexValue !== undefined ? regexValue : null;
-  }
-
-  // Special handling for some fields
-  let total_amount = getField("total_amount", regexAmount);
-  if (typeof total_amount === "string") {
-    total_amount = parseFloat(total_amount.replace(/[^0-9.]/g, ""));
-  }
-  let card_type = getField("card_type", regexCard.card_type);
-  let card_last4 = getField("card_last4", regexCard.card_last4);
-
-  // Insert into Supabase
+  // Insert into receipts table using parsed fields
   const { error } = await supabase
     .from('receipts')
     .insert([{
-      email_sender:   getField("email_sender", From),
-      subject:        getField("subject", Subject),
-      body_text:      textBody || null,
-      body_html:      htmlBody || null,
-      total_amount,
-      vendor:         getField("vendor", null),
-      vendor_name:    getField("vendor", null),
-      order_date:     getField("order_date", null),
-      category:       getField("category", null),
-      form_of_payment: getField("form_of_payment", card_type ? "Card" : null),
-      card_type,
-      card_last4,
-      tracking_number: getField("tracking_number", null),
+      email_sender:   parsed.email_sender,
+      subject:        parsed.subject,
+      body_text:      TextBody || null,
+      body_html:      HtmlBody || null,
+      total_amount:   parsed.total_amount,
+      vendor:         parsed.vendor,
+      vendor_name:    parsed.vendor,
+      order_date:     parsed.order_date,
+      category:       parsed.category,
+      form_of_payment: parsed.form_of_payment,
+      card_type:      parsed.card_type,
+      card_last4:     parsed.card_last4,
+      tracking_number: parsed.tracking_number,
       message_id:     MessageID || null,
       received_at:    receivedAt
     }]);
@@ -136,5 +118,5 @@ Body: ${body}
     return res.status(500).json({ error: 'Database insert failed' });
   }
 
-  return res.status(200).json({ message: 'Email processed successfully (Hybrid LLM+Regex)' });
+  return res.status(200).json({ message: 'Email processed successfully (OpenAI)' });
 }
