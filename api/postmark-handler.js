@@ -1,122 +1,358 @@
 import { createClient } from '@supabase/supabase-js';
-import { OpenAI } from 'openai';
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const LLM_API_KEY = process.env.LLM_API_KEY;
+const LLM_API_URL = process.env.LLM_API_URL || 'https://api.openai.com/v1/chat/completions';
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 export default async function handler(req, res) {
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method Not Allowed' });
-  }
-
-  const { From, Subject, TextBody, HtmlBody, MessageID } = req.body;
-  const html       = HtmlBody || '';
-  const text       = TextBody || '';
-  const body       = (text || html).replace(/\r/g, '');
-  const receivedAt = new Date();
-
-  // Force JSON only from LLM
-  const prompt = `
-You are a world-class receipt-parsing assistant. Extract ONLY the following fields from the provided email receipt.
-- Respond ONLY with a valid JSON object and nothing else.
-- Do not include comments, explanations, or apologies.
-- If a field is missing, set it to null.
-
-JSON fields to extract:
-email_sender, subject, total_amount (number, no $ sign), vendor, order_date (YYYY-MM-DD), form_of_payment ("Card" or "Cash"), card_type ("Visa", "MasterCard", "AMEX", etc), card_last4 (4 digits), category, tracking_number
-
-Email sender: ${From || ""}
-Subject: ${Subject || ""}
-Body: ${body}
-Output ONLY the JSON object as your answer.
-  `.trim();
-
-  let parsed = {};
-  let openAIContent = '';
   try {
-    const aiRes = await openai.chat.completions.create({
-      model: "gpt-3.5-turbo",
-      messages: [
-        { role: "system", content: "You are a world-class receipts-parsing assistant." },
-        { role: "user",   content: prompt }
-      ],
-      max_tokens: 400,
-      temperature: 0 // Less creative, more accurate
-    });
+    if (req.method !== 'POST') {
+      return res.status(405).json({ error: 'Method Not Allowed' });
+    }
 
-    openAIContent = aiRes.choices[0]?.message?.content?.trim();
-    console.log("OpenAI content:", openAIContent);
-    parsed = JSON.parse(openAIContent);
+    // Parse incoming email fields
+    const data = req.body;
+    const emailSender = data['From'] || data['sender'] || '';
+    const subject = data['Subject'] || data['subject'] || '';
+    const timestamp = data['Date'] || data['date'] || new Date().toISOString();
+    const messageId = data['MessageID'] || data['message_id'] || null;
+    const bodyText = data['body-plain'] || data['stripped-text'] || data['text'] || data['TextBody'] || '';
+    const bodyHtml = data['HtmlBody'] || data['html'] || '';
 
-    // Defensive: ensure every key exists
-    parsed = {
-      email_sender:   parsed.email_sender ?? (From || null),
-      subject:        parsed.subject ?? (Subject || null),
-      total_amount:   parsed.total_amount ?? null,
-      vendor:         parsed.vendor ?? null,
-      order_date:     parsed.order_date ?? null,
-      form_of_payment: parsed.form_of_payment ?? null,
-      card_type:      parsed.card_type ?? null,
-      card_last4:     parsed.card_last4 ?? null,
-      category:       parsed.category ?? null,
-      tracking_number: parsed.tracking_number ?? null
-    };
+    // Use plain text first, fallback to HTML
+    const emailText = bodyText || bodyHtml || '';
 
+    // Debug: log what we send to the LLM
+    console.log('RAW EMAIL TEXT TO LLM:', emailText);
+
+    if (!emailText) {
+      console.error('No email text found in webhook payload.');
+      return res.status(400).json({ error: 'No email text found.' });
+    }
+
+    // Build LLM prompt
+    const llmPrompt = `
+You are a receipt parser. Extract these fields as JSON from the receipt text:
+- vendor (store name)
+- total_amount (number, no currency sign)
+- order_date (YYYY-MM-DD)
+- form_of_payment (e.g. Card, PayPal, Apple Pay)
+- card_type (Visa, MasterCard, Amex, Discover, etc)
+- card_last4 (last 4 digits)
+- category (shopping, travel, etc)
+- tracking_number (if any)
+
+If any field is missing, use null. Output **only JSON** (no comments, no text).
+
+Receipt email:
+${emailText}
+`;
+
+    // Call the LLM
+    let llmResponseJson = {};
+    try {
+      const response = await fetch(LLM_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${LLM_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model: 'gpt-4o', // or gpt-3.5-turbo if needed
+          messages: [{ role: 'user', content: llmPrompt }],
+          max_tokens: 512,
+        }),
+      });
+      const responseJson = await response.json();
+      const llmText = responseJson.choices?.[0]?.message?.content || '{}';
+      console.log('LLM RESULT:', llmText);
+
+      // --- STRIP CODE FENCING BACKTICKS ---
+      const cleanLLMText = llmText.replace(/```json|```/gi, '').trim();
+      try {
+        llmResponseJson = JSON.parse(cleanLLMText);
+      } catch (e) {
+        console.error('Failed to parse LLM JSON:', llmText);
+        llmResponseJson = {};
+      }
+    } catch (err) {
+      console.error('LLM API call failed:', err);
+    }
+
+    // Fallbacks for missing fields
+    if (!llmResponseJson.vendor) {
+      const vendorMatch =
+        subject.match(/from ([\w\s&'’]+)/i) ||
+        emailText.match(/Thank you for shopping at ([A-Za-z\s'’]+)[.!]/i) ||
+        emailText.match(/at ([A-Za-z\s'’]+)[.!]/i);
+      llmResponseJson.vendor =
+        vendorMatch?.[1]?.trim() ||
+        emailSender.split('@')[1]?.split('.')[0] ||
+        null;
+    }
+
+    if (!llmResponseJson.total_amount) {
+      const totalMatch =
+        emailText.match(/total[\s:]*\$?([\d,]+\.\d{2})/i) ||
+        emailText.match(/total tender[\s:]*\$?([\d,]+\.\d{2})/i);
+      if (totalMatch) {
+        llmResponseJson.total_amount = parseFloat(
+          totalMatch[1].replace(/,/g, '')
+        );
+      }
+    }
+
+    if (!llmResponseJson.order_date) {
+      const dateMatch =
+        emailText.match(/(\d{2}\/\d{2}\/\d{4})/) ||
+        emailText.match(/([A-Za-z]+ \d{1,2}, \d{4})/);
+      if (dateMatch) {
+        let isoDate;
+        try {
+          isoDate = new Date(dateMatch[1]).toISOString().split('T')[0];
+        } catch {
+          isoDate = null;
+        }
+        llmResponseJson.order_date = isoDate || null;
+      }
+    }
+
+    if (!llmResponseJson.card_type || !llmResponseJson.card_last4) {
+      const cardMatch =
+        emailText.match(/(Visa|MasterCard|Amex|American Express|Discover)[^\d]*[xX*]{2,}(\d{4})/) ||
+        emailText.match(/(Visa|MasterCard|Amex|American Express|Discover)[^\d]*\*+(\d{4})/) ||
+        emailText.match(/Account[^\d]*X+(\d{4})/);
+      if (cardMatch) {
+        llmResponseJson.card_type =
+          cardMatch[1]?.replace(/American Express/i, 'Amex') || null;
+        llmResponseJson.card_last4 = cardMatch[2] || null;
+        llmResponseJson.form_of_payment = 'Card';
+      }
+    }
+
+    if (!llmResponseJson.category) llmResponseJson.category = null;
+
+    // ---- ENSURE FIELDS MATCH SUPABASE AND FRONTEND ----
+    llmResponseJson.vendor_name = llmResponseJson.vendor || null;
+    llmResponseJson.total_amount = llmResponseJson.total_amount || null;
+    llmResponseJson.order_date = llmResponseJson.order_date || null;
+    llmResponseJson.form_of_payment = llmResponseJson.form_of_payment || null;
+    llmResponseJson.card_type = llmResponseJson.card_type || null;
+    llmResponseJson.card_last4 = llmResponseJson.card_last4 || null;
+    llmResponseJson.category = llmResponseJson.category || null;
+    llmResponseJson.tracking_number = llmResponseJson.tracking_number || null;
+
+    // Add all extra metadata for traceability
+    llmResponseJson.email_sender = emailSender;
+    llmResponseJson.subject = subject;
+    llmResponseJson.body_text = bodyText || null;
+    llmResponseJson.body_html = bodyHtml || null;
+    llmResponseJson.message_id = messageId || null;
+    llmResponseJson.received_at = timestamp;
+
+    // Legacy/compatibility fields (optional)
+    llmResponseJson.vendor = llmResponseJson.vendor_name;
+    llmResponseJson.amount = llmResponseJson.total_amount;
+    llmResponseJson.receipt_date = llmResponseJson.order_date;
+
+    // Debug: log final JSON
+    console.log('FINAL RECEIPT JSON:', llmResponseJson);
+
+    // Save to Supabase
+    const { error } = await supabase
+      .from('receipts')
+      .insert([llmResponseJson]);
+
+    if (error) {
+      console.error('Supabase insert error:', error);
+      return res.status(500).json({ error: 'Failed to insert into Supabase.' });
+    }
+
+    res.status(200).json({ success: true });
   } catch (err) {
-    console.warn("OpenAI parsing failed, falling back to regex-only:", err);
-    console.warn("OpenAI response content was:", openAIContent);
-
-    // --- Basic regex fallback ---
-    // (Add your preferred regex parsing here, but keeping it simple for demo)
-    const amountMatch = (body.match(/\$([\d,]+\.\d{2}|\d+)/) || [])[1];
-    let amount = amountMatch ? parseFloat(amountMatch.replace(/,/g, '')) : null;
-
-    // (You can extend these with more robust patterns as needed)
-    parsed = {
-      email_sender:   From || null,
-      subject:        Subject || null,
-      total_amount:   amount,
-      vendor:         null,
-      order_date:     null,
-      form_of_payment: null,
-      card_type:      null,
-      card_last4:     null,
-      category:       null,
-      tracking_number: null
-    };
+    console.error('Handler error:', err);
+    res.status(500).json({ error: 'Server error.' });
   }
+}
+// postmark-handler.js
 
-  // Insert into receipts table using parsed fields
-  const { error } = await supabase
-    .from('receipts')
-    .insert([{
-      email_sender:   parsed.email_sender,
-      subject:        parsed.subject,
-      body_text:      TextBody || null,
-      body_html:      HtmlBody || null,
-      total_amount:   parsed.total_amount,
-      vendor:         parsed.vendor,
-      vendor_name:    parsed.vendor,
-      order_date:     parsed.order_date,
-      category:       parsed.category,
-      form_of_payment: parsed.form_of_payment,
-      card_type:      parsed.card_type,
-      card_last4:     parsed.card_last4,
-      tracking_number: parsed.tracking_number,
-      message_id:     MessageID || null,
-      received_at:    receivedAt
-    }]);
+import { createClient } from '@supabase/supabase-js';
 
-  if (error) {
-    console.error('Supabase insert error:', error);
-    return res.status(500).json({ error: 'Database insert failed' });
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY; // NOTE: This matches your env file!
+const LLM_API_KEY = process.env.LLM_API_KEY;
+const LLM_API_URL = process.env.LLM_API_URL || 'https://api.openai.com/v1/chat/completions';
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+export default async function handler(req, res) {
+  try {
+    if (req.method !== 'POST') {
+      return res.status(405).json({ error: 'Method Not Allowed' });
+    }
+
+    // Parse incoming email fields
+    const data = req.body;
+    const emailSender = data['From'] || data['sender'] || '';
+    const subject = data['Subject'] || data['subject'] || '';
+    const timestamp = data['Date'] || data['date'] || new Date().toISOString();
+    const messageId = data['MessageID'] || data['message_id'] || null;
+    const bodyText = data['body-plain'] || data['stripped-text'] || data['text'] || data['TextBody'] || '';
+    const bodyHtml = data['HtmlBody'] || data['html'] || '';
+
+    // Use plain text first, fallback to HTML
+    const emailText = bodyText || bodyHtml || '';
+
+    // Debug: log what we send to the LLM
+    console.log('RAW EMAIL TEXT TO LLM:', emailText);
+
+    if (!emailText) {
+      console.error('No email text found in webhook payload.');
+      return res.status(400).json({ error: 'No email text found.' });
+    }
+
+    // Build LLM prompt
+    const llmPrompt = `
+You are a receipt parser. Extract these fields as JSON from the receipt text:
+- vendor (store name)
+- total_amount (number, no currency sign)
+- order_date (YYYY-MM-DD)
+- form_of_payment (e.g. Card, PayPal, Apple Pay)
+- card_type (Visa, MasterCard, Amex, Discover, etc)
+- card_last4 (last 4 digits)
+- category (shopping, travel, etc)
+- tracking_number (if any)
+
+If any field is missing, use null. Output **only JSON** (no comments, no text).
+
+Receipt email:
+${emailText}
+`;
+
+    // Call the LLM
+    let llmResponseJson = {};
+    try {
+      const response = await fetch(LLM_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${LLM_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model: 'gpt-4o', // or gpt-3.5-turbo if needed
+          messages: [{ role: 'user', content: llmPrompt }],
+          max_tokens: 512,
+        }),
+      });
+      const responseJson = await response.json();
+      // LLM returns string in choices[0].message.content
+      const llmText = responseJson.choices?.[0]?.message?.content || '{}';
+      // Log raw LLM result
+      console.log('LLM RESULT:', llmText);
+
+      // --- STRIP CODE FENCING BACKTICKS ---
+      const cleanLLMText = llmText.replace(/```json|```/gi, '').trim();
+      try {
+        llmResponseJson = JSON.parse(cleanLLMText);
+      } catch (e) {
+        console.error('Failed to parse LLM JSON:', llmText);
+        llmResponseJson = {};
+      }
+    } catch (err) {
+      console.error('LLM API call failed:', err);
+    }
+
+    // Regex fallback for any null fields
+    // 1. Vendor fallback (subject, emailText, or sender domain)
+    if (!llmResponseJson.vendor) {
+      const vendorMatch =
+        subject.match(/from ([\w\s&'’]+)/i) ||
+        emailText.match(/Thank you for shopping at ([A-Za-z\s'’]+)[.!]/i) ||
+        emailText.match(/at ([A-Za-z\s'’]+)[.!]/i);
+      llmResponseJson.vendor =
+        vendorMatch?.[1]?.trim() ||
+        emailSender.split('@')[1]?.split('.')[0] ||
+        null;
+    }
+
+    // 2. Total amount fallback
+    if (!llmResponseJson.total_amount) {
+      const totalMatch =
+        emailText.match(/total[\s:]*\$?([\d,]+\.\d{2})/i) ||
+        emailText.match(/total tender[\s:]*\$?([\d,]+\.\d{2})/i);
+      if (totalMatch) {
+        llmResponseJson.total_amount = parseFloat(
+          totalMatch[1].replace(/,/g, '')
+        );
+      }
+    }
+
+    // 3. Order date fallback
+    if (!llmResponseJson.order_date) {
+      // Look for date in mm/dd/yyyy or month dd, yyyy
+      const dateMatch =
+        emailText.match(/(\d{2}\/\d{2}\/\d{4})/) ||
+        emailText.match(
+          /([A-Za-z]+ \d{1,2}, \d{4})/
+        );
+      if (dateMatch) {
+        let isoDate;
+        try {
+          isoDate = new Date(dateMatch[1]).toISOString().split('T')[0];
+        } catch {
+          isoDate = null;
+        }
+        llmResponseJson.order_date = isoDate || null;
+      }
+    }
+
+    // 4. Card details fallback
+    if (!llmResponseJson.card_type || !llmResponseJson.card_last4) {
+      const cardMatch =
+        emailText.match(/(Visa|MasterCard|Amex|American Express|Discover)[^\d]*[xX*]{2,}(\d{4})/) ||
+        emailText.match(/(Visa|MasterCard|Amex|American Express|Discover)[^\d]*\*+(\d{4})/) ||
+        emailText.match(/Account[^\d]*X+(\d{4})/);
+      if (cardMatch) {
+        llmResponseJson.card_type =
+          cardMatch[1]?.replace(/American Express/i, 'Amex') || null;
+        llmResponseJson.card_last4 = cardMatch[2] || null;
+        llmResponseJson.form_of_payment = 'Card';
+      }
+    }
+
+    // 5. Fallback: category (just "Other" for now if nothing else found)
+    if (!llmResponseJson.category) llmResponseJson.category = null;
+
+    // --- ADD FOR FRONTEND COMPATIBILITY ---
+    llmResponseJson.vendor_name = llmResponseJson.vendor || null;
+
+    // Add other metadata
+    llmResponseJson.email_sender = emailSender;
+    llmResponseJson.subject = subject;
+    llmResponseJson.body_text = bodyText || null;
+    llmResponseJson.body_html = bodyHtml || null;
+    llmResponseJson.message_id = messageId || null;
+    llmResponseJson.received_at = timestamp;
+
+    // Debug: log final JSON
+    console.log('FINAL RECEIPT JSON:', llmResponseJson);
+
+    // Save to Supabase
+    const { error } = await supabase
+      .from('receipts')
+      .insert([llmResponseJson]);
+
+    if (error) {
+      console.error('Supabase insert error:', error);
+      return res.status(500).json({ error: 'Failed to insert into Supabase.' });
+    }
+
+    res.status(200).json({ success: true });
+  } catch (err) {
+    console.error('Handler error:', err);
+    res.status(500).json({ error: 'Server error.' });
   }
-
-  return res.status(200).json({ message: 'Email processed successfully (OpenAI)' });
 }
