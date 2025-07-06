@@ -15,7 +15,7 @@
     "formidable": "^3.5.4",
     "node-fetch": "^3.3.2",
     "openai": "^4.104.0",
-    "tesseract.js": "^6.0.1",
-    "pdfjs-dist": "^5.3.31"
+    "pdf-parse": "1.0.1",
+    "tesseract.js": "^6.0.1"
   }
 }
