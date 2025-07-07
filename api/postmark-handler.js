@@ -2,16 +2,13 @@ import { createClient } from '@supabase/supabase-js';
 import * as cheerio from 'cheerio';
 import { IncomingForm } from 'formidable';
 import fs from 'fs';
-import fetch from 'node-fetch';
+import axios from 'axios';
+import FormData from 'form-data';
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const LLM_API_KEY = process.env.LLM_API_KEY;
 const LLM_API_URL = process.env.LLM_API_URL || 'https://api.openai.com/v1/chat/completions';
-
-// OCR.space API
-const OCR_API_KEY = 'K81861121988957';
-const OCR_API_URL = 'https://api.ocr.space/parse/image';
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
@@ -21,7 +18,41 @@ export const config = {
   },
 };
 
-// --- VENDOR PREFER SUBJECT OR SENDER ---
+// --- OCR.space API Helper ---
+async function ocrSpaceImage(filePath, fileName) {
+  try {
+    const formData = new FormData();
+    formData.append('file', fs.createReadStream(filePath), fileName);
+    formData.append('language', 'eng');
+    formData.append('isOverlayRequired', 'false');
+    formData.append('apikey', 'K81861121988957'); // your API key
+    const response = await axios.post('https://api.ocr.space/parse/image', formData, {
+      headers: {
+        ...formData.getHeaders(),
+      },
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
+    });
+    const parsedText = response.data?.ParsedResults?.[0]?.ParsedText || '';
+    return parsedText;
+  } catch (err) {
+    console.error('OCR.space error:', err?.response?.data || err);
+    return '';
+  }
+}
+
+// --- Helper: is "low value" body ---
+function isLowValueBody(text) {
+  if (!text) return true;
+  const cleaned = text.replace(/[\s\r\n>﻿]+/g, '').toLowerCase();
+  if (cleaned.length < 5) return true;
+  if (
+    /sentfrommyiphone|receiptattached|seeattached|fwd|thankyou|regards|cheers|signature|receiptattached|invoiceattached|pleasefindattached|scannedcopy|scanattached|forwardedmessage|-----forwardedmessage-----|thismessagewas/i.test(cleaned)
+  ) return true;
+  return false;
+}
+
+// --- VENDOR PREFER SUBJECT OR SENDER (unchanged) ---
 function extractVendor({ subject, emailSender, bodyText }) {
   subject = typeof subject === 'string' ? subject : (Array.isArray(subject) ? subject.join(' ') : '');
   bodyText = typeof bodyText === 'string' ? bodyText : (Array.isArray(bodyText) ? bodyText.join(' ') : '');
@@ -52,7 +83,7 @@ function extractVendor({ subject, emailSender, bodyText }) {
   return null;
 }
 
-// --- CATEGORY NORMALIZATION ---
+// --- CATEGORY NORMALIZATION (unchanged) ---
 function normalizeCategory(category, vendor, haystack) {
   if (!category && !haystack) return null;
   let c = (category || '').toLowerCase();
@@ -97,13 +128,13 @@ function normalizeCategory(category, vendor, haystack) {
   return null;
 }
 
-// --- CATEGORY GUESS ---
+// --- CATEGORY GUESS (unchanged) ---
 function guessCategory({ category, vendor, subject, bodyText }) {
   const haystack = `${vendor || ''} ${subject || ''} ${bodyText || ''}`.toLowerCase();
   return normalizeCategory(category, vendor, haystack);
 }
 
-// --- HTML CARD LOGO EXTRACTOR ---
+// --- HTML CARD LOGO EXTRACTOR (unchanged) ---
 function extractCardDetailsFromHtml(html) {
   if (!html) return {};
   const $ = cheerio.load(html);
@@ -155,60 +186,38 @@ export default async function handler(req, res) {
         const messageId = fields['MessageID'] || fields['message_id'] || null;
         const receivedAtIso = new Date(rawTimestamp).toISOString();
 
-        // --- Fallback attachment extraction (OCR.space/PDF) ---
-        let attachmentText = '';
-        if (files && Object.keys(files).length > 0) {
-          const fileObjs = Object.values(files).flat();
-          for (const file of fileObjs) {
-            if (file.mimetype && file.mimetype.startsWith('image/')) {
-              try {
-                const formData = new FormData();
-                formData.append('apikey', OCR_API_KEY);
-                formData.append('language', 'eng');
-                formData.append('isOverlayRequired', 'false');
-                formData.append('file', fs.createReadStream(file.filepath));
-                const ocrRes = await fetch(OCR_API_URL, {
-                  method: 'POST',
-                  body: formData,
-                });
-                const ocrJson = await ocrRes.json();
-                if (
-                  ocrJson &&
-                  ocrJson.ParsedResults &&
-                  ocrJson.ParsedResults.length > 0 &&
-                  ocrJson.ParsedResults[0].ParsedText
-                ) {
-                  attachmentText += '\n' + ocrJson.ParsedResults[0].ParsedText;
-                }
-              } catch (err) {
-                console.error('Image OCR.space error:', err);
-              }
-            } else if (file.mimetype === 'application/pdf') {
-              try {
-                const pdfParse = (await import('pdf-parse')).default;
-                const dataBuffer = fs.readFileSync(file.filepath);
-                const pdfData = await pdfParse(dataBuffer);
-                if (pdfData && pdfData.text) {
-                  attachmentText += '\n' + pdfData.text;
-                }
-              } catch (pdfErr) {
-                console.error('PDF parse error:', pdfErr);
-              }
-            }
-          }
-        }
-
         // Stringify fields before checks
         subject = typeof subject === 'string' ? subject : (Array.isArray(subject) ? subject.join(' ') : '');
         bodyText = typeof bodyText === 'string' ? bodyText : (Array.isArray(bodyText) ? bodyText.join(' ') : '');
         bodyHtml = typeof bodyHtml === 'string' ? bodyHtml : (Array.isArray(bodyHtml) ? bodyHtml.join(' ') : '');
         emailSender = typeof emailSender === 'string' ? emailSender : (Array.isArray(emailSender) ? emailSender.join(' ') : '');
 
-        // If BOTH bodyText and bodyHtml are empty, but we extracted text from attachments, use it as a fallback:
-        if (
-          ((!bodyText || bodyText.trim().length === 0) && (!bodyHtml || bodyHtml.trim().length === 0))
-          && attachmentText && attachmentText.trim().length > 10
-        ) {
+        // --- Fallback: If body is empty or low-value AND we have attachments, OCR attachments
+        let attachmentText = '';
+        if (isLowValueBody(bodyText) && files && Object.keys(files).length > 0) {
+          const fileObjs = Object.values(files).flat();
+          for (const file of fileObjs) {
+            if (
+              (file.mimetype && (
+                file.mimetype.startsWith('image/') ||
+                file.mimetype === 'application/pdf'
+              )) &&
+              fs.existsSync(file.filepath)
+            ) {
+              try {
+                const ocrResult = await ocrSpaceImage(file.filepath, file.originalFilename || file.newFilename);
+                if (ocrResult && ocrResult.trim().length > 0) {
+                  attachmentText += '\n' + ocrResult;
+                }
+              } catch (err) {
+                console.error('OCR fallback error:', err);
+              }
+            }
+          }
+        }
+
+        // If both bodyText and bodyHtml are empty/low-value, use attachmentText as fallback
+        if ((isLowValueBody(bodyText) && isLowValueBody(bodyHtml)) && attachmentText.trim().length > 0) {
           bodyText = attachmentText;
         }
 
@@ -217,7 +226,7 @@ export default async function handler(req, res) {
         }
 
         await runMainParser({
-          emailSender, subject, bodyText, bodyHtml, messageId, receivedAtIso, res, attachmentText
+          emailSender, subject, bodyText, bodyHtml, messageId, receivedAtIso, res
         });
       });
       return;
@@ -242,7 +251,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'No email text found.' });
     }
     await runMainParser({
-      emailSender, subject, bodyText, bodyHtml, messageId, receivedAtIso, res, attachmentText: ''
+      emailSender, subject, bodyText, bodyHtml, messageId, receivedAtIso, res
     });
   } catch (err) {
     console.error('Handler failure:', err);
@@ -250,9 +259,9 @@ export default async function handler(req, res) {
   }
 }
 
-// --- MAIN PARSER LOGIC with "junk body fallback to attachment" ---
+// --- MAIN PARSER LOGIC (unchanged) ---
 async function runMainParser({
-  emailSender, subject, bodyText, bodyHtml, messageId, receivedAtIso, res, attachmentText = ''
+  emailSender, subject, bodyText, bodyHtml, messageId, receivedAtIso, res
 }) {
   try {
     subject = typeof subject === 'string' ? subject : (Array.isArray(subject) ? subject.join(' ') : '');
@@ -300,79 +309,6 @@ If any field is missing, use null. Output only JSON.\n\nReceipt email:\n${emailT
     } catch (err) {
       console.error('LLM API Error:', err);
     }
-
-    // --------- JUNK BODY + NULL FIELDS FALLBACK TO ATTACHMENT ----------
-    const likelyJunkPatterns = [
-      /receipt attached/i,
-      /see attached/i,
-      /attached is your receipt/i,
-      /please see attached/i,
-      /thank you for your purchase/i,
-      /thank you for shopping/i,
-      /sent from my iphone/i,
-      /sent from/i,
-      /sent via/i,
-      /^best( regards)?[, ]*$/im,
-      /^thanks?[, ]*$/im,
-      /^cheers[, ]*$/im
-    ];
-
-    function isBodyJunk(text) {
-      if (!text || text.trim().length < 6) return true; // Empty, whitespace, or too short
-      return likelyJunkPatterns.some(pat => pat.test(text));
-    }
-
-    function isLLMResultMostlyNull(r) {
-      const keys = ['total_amount', 'order_date', 'form_of_payment', 'card_type', 'card_last4', 'tracking_number', 'invoice_number'];
-      return keys.every(k => r[k] === null || r[k] === undefined);
-    }
-
-    if (
-      isBodyJunk(bodyText) &&
-      isLLMResultMostlyNull(llmResponseJson) &&
-      attachmentText && attachmentText.trim().length > 10
-    ) {
-      // Run the LLM a second time, with the attachment text:
-      console.log('Detected junk body, re-parsing with attachment text...');
-      const newPrompt = `You are a receipt parser. Extract these fields as JSON from the receipt text:
-- vendor
-- total_amount
-- order_date
-- form_of_payment
-- card_type
-- card_last4
-- category
-- tracking_number
-- invoice_number
-If any field is missing, use null. Output only JSON.\n\nReceipt attachment text:\n${attachmentText}`;
-      try {
-        const response = await fetch(LLM_API_URL, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${LLM_API_KEY}`,
-          },
-          body: JSON.stringify({
-            model: 'gpt-4o',
-            messages: [{ role: 'user', content: newPrompt }],
-            max_tokens: 512,
-          }),
-        });
-        const result = await response.json();
-        const content = result.choices?.[0]?.message?.content || '{}';
-        const attachmentLLM = JSON.parse(content.replace(/```json|```/gi, '').trim());
-        Object.assign(llmResponseJson, attachmentLLM);
-        for (const k in attachmentLLM) {
-          if (attachmentLLM[k] !== null && attachmentLLM[k] !== undefined) {
-            fieldSources[k] = 'attachment_llm_fallback';
-          }
-        }
-      } catch (err) {
-        console.error('LLM API Error (attachment fallback):', err);
-      }
-    }
-    // -------------------------------------------------------------------
-
     // --- Vendor fix: prefer subject, sender, domain, then body fallback
     const extractedVendor = extractVendor({ subject, emailSender, bodyText });
     if (
