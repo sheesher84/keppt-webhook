@@ -4,6 +4,9 @@ import { IncomingForm } from 'formidable';
 import fs from 'fs';
 import axios from 'axios';
 import FormData from 'form-data';
+import heicConvert from 'heic-convert'; // HEIC support
+import path from 'path';
+import os from 'os';
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -14,22 +17,20 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 export const config = {
   api: {
-    bodyParser: false, // Required for formidable to parse attachments
+    bodyParser: false,
   },
 };
 
-// --- OCR.space API Helper ---
 async function ocrSpaceImage(filePath, fileName) {
   try {
     const formData = new FormData();
     formData.append('file', fs.createReadStream(filePath), fileName);
     formData.append('language', 'eng');
     formData.append('isOverlayRequired', 'false');
-    formData.append('apikey', 'K81861121988957'); // your API key
+    formData.append('apikey', 'K81861121988957');
+    formData.append('OCREngine', '2');
     const response = await axios.post('https://api.ocr.space/parse/image', formData, {
-      headers: {
-        ...formData.getHeaders(),
-      },
+      headers: { ...formData.getHeaders() },
       maxContentLength: Infinity,
       maxBodyLength: Infinity,
     });
@@ -41,7 +42,6 @@ async function ocrSpaceImage(filePath, fileName) {
   }
 }
 
-// --- Helper: is "low value" body ---
 function isLowValueBody(text) {
   if (!text) return true;
   const cleaned = text.replace(/[\s\r\n>﻿]+/g, '').toLowerCase();
@@ -52,7 +52,6 @@ function isLowValueBody(text) {
   return false;
 }
 
-// --- VENDOR PREFER SUBJECT OR SENDER (unchanged) ---
 function extractVendor({ subject, emailSender, bodyText }) {
   subject = typeof subject === 'string' ? subject : (Array.isArray(subject) ? subject.join(' ') : '');
   bodyText = typeof bodyText === 'string' ? bodyText : (Array.isArray(bodyText) ? bodyText.join(' ') : '');
@@ -83,7 +82,6 @@ function extractVendor({ subject, emailSender, bodyText }) {
   return null;
 }
 
-// --- CATEGORY NORMALIZATION (unchanged) ---
 function normalizeCategory(category, vendor, haystack) {
   if (!category && !haystack) return null;
   let c = (category || '').toLowerCase();
@@ -128,13 +126,11 @@ function normalizeCategory(category, vendor, haystack) {
   return null;
 }
 
-// --- CATEGORY GUESS (unchanged) ---
 function guessCategory({ category, vendor, subject, bodyText }) {
   const haystack = `${vendor || ''} ${subject || ''} ${bodyText || ''}`.toLowerCase();
   return normalizeCategory(category, vendor, haystack);
 }
 
-// --- HTML CARD LOGO EXTRACTOR (unchanged) ---
 function extractCardDetailsFromHtml(html) {
   if (!html) return {};
   const $ = cheerio.load(html);
@@ -163,7 +159,6 @@ function extractCardDetailsFromHtml(html) {
   return { cardType, cardLast4 };
 }
 
-// --- MAIN HANDLER ---
 export default async function handler(req, res) {
   try {
     if (req.method !== 'POST') {
@@ -186,13 +181,12 @@ export default async function handler(req, res) {
         const messageId = fields['MessageID'] || fields['message_id'] || null;
         const receivedAtIso = new Date(rawTimestamp).toISOString();
 
-        // Stringify fields before checks
         subject = typeof subject === 'string' ? subject : (Array.isArray(subject) ? subject.join(' ') : '');
         bodyText = typeof bodyText === 'string' ? bodyText : (Array.isArray(bodyText) ? bodyText.join(' ') : '');
         bodyHtml = typeof bodyHtml === 'string' ? bodyHtml : (Array.isArray(bodyHtml) ? bodyHtml.join(' ') : '');
         emailSender = typeof emailSender === 'string' ? emailSender : (Array.isArray(emailSender) ? emailSender.join(' ') : '');
 
-        // --- Fallback: If body is empty or low-value AND we have attachments, OCR attachments
+        // --- Attachment processing with enhanced HEIC logic ---
         let attachmentText = '';
         if (isLowValueBody(bodyText) && files && Object.keys(files).length > 0) {
           const fileObjs = Object.values(files).flat();
@@ -204,8 +198,35 @@ export default async function handler(req, res) {
               )) &&
               fs.existsSync(file.filepath)
             ) {
+              // HEIC/HEIF enhanced logging and error handling
+              let ocrFilePath = file.filepath;
+              let ocrFileName = file.originalFilename || file.newFilename;
+              const ext = path.extname(ocrFilePath).toLowerCase();
+
+              // LOG: Every attachment
+              console.log('Attachment received:', file.originalFilename || file.newFilename, file.mimetype, fs.statSync(file.filepath).size);
+
+              if (['.heic', '.heif'].includes(ext)) {
+                console.log('Attempting HEIC conversion:', file.originalFilename || file.newFilename, ocrFilePath);
+                try {
+                  const inputBuffer = fs.readFileSync(file.filepath);
+                  const outputBuffer = await heicConvert({
+                    buffer: inputBuffer,
+                    format: 'JPEG',
+                    quality: 1,
+                  });
+                  ocrFileName = path.basename(file.filepath, ext) + '.jpg';
+                  ocrFilePath = path.join(os.tmpdir(), ocrFileName);
+                  fs.writeFileSync(ocrFilePath, outputBuffer);
+                  console.log('HEIC conversion success:', ocrFilePath);
+                } catch (err) {
+                  console.error('HEIC conversion failed:', err, 'File:', file.originalFilename || file.newFilename, ocrFilePath);
+                  return res.status(400).json({ error: 'HEIC conversion failed. Please send a JPG/PNG or try resizing your photo before sending.' });
+                }
+              }
+              // OCR as before, but use potentially converted file
               try {
-                const ocrResult = await ocrSpaceImage(file.filepath, file.originalFilename || file.newFilename);
+                const ocrResult = await ocrSpaceImage(ocrFilePath, ocrFileName);
                 if (ocrResult && ocrResult.trim().length > 0) {
                   attachmentText += '\n' + ocrResult;
                 }
@@ -216,7 +237,6 @@ export default async function handler(req, res) {
           }
         }
 
-        // If both bodyText and bodyHtml are empty/low-value, use attachmentText as fallback
         if ((isLowValueBody(bodyText) && isLowValueBody(bodyHtml)) && attachmentText.trim().length > 0) {
           bodyText = attachmentText;
         }
@@ -259,7 +279,9 @@ export default async function handler(req, res) {
   }
 }
 
-// --- MAIN PARSER LOGIC (unchanged) ---
+// -----------------------------
+//        runMainParser
+// -----------------------------
 async function runMainParser({
   emailSender, subject, bodyText, bodyHtml, messageId, receivedAtIso, res
 }) {
@@ -309,7 +331,7 @@ If any field is missing, use null. Output only JSON.\n\nReceipt email:\n${emailT
     } catch (err) {
       console.error('LLM API Error:', err);
     }
-    // --- Vendor fix: prefer subject, sender, domain, then body fallback
+    // Vendor fix: prefer subject, sender, domain, then body fallback
     const extractedVendor = extractVendor({ subject, emailSender, bodyText });
     if (
       !llmResponseJson.vendor ||
@@ -321,11 +343,44 @@ If any field is missing, use null. Output only JSON.\n\nReceipt email:\n${emailT
         fieldSources.vendor = 'contextual_extraction';
       }
     }
+    // --- [NEW] FORM_OF_PAYMENT NORMALIZATION ---
+    if (llmResponseJson.form_of_payment) {
+      const val = String(llmResponseJson.form_of_payment).toLowerCase();
+      if (
+        /card|credit|debit|chip|contactless|swipe|tap|stripe/.test(val) ||
+        ['mastercard', 'matercard', 'mc', 'visa', 'amex', 'american express', 'discover', 'diners', 'jcb', 'unionpay'].some(network => val.includes(network))
+      ) {
+        llmResponseJson.form_of_payment = 'Card';
+        fieldSources.form_of_payment = 'normalized';
+      }
+    }
+    // --- [NEW] CARD_TYPE NORMALIZATION ---
+    if (llmResponseJson.card_type) {
+      let ct = String(llmResponseJson.card_type).toLowerCase();
+      // Mastercard variants -> MC
+      if (/^m[a@]st[e3]?r?c?a?r?d?$/i.test(ct) || /matercard/i.test(ct) || ct === "mastercard" || ct === "matercard" || ct === "mc") {
+        llmResponseJson.card_type = "MC";
+        fieldSources.card_type = 'normalized';
+      }
+      // Visa -> VISA
+      else if (/visa/.test(ct)) {
+        llmResponseJson.card_type = "VISA";
+        fieldSources.card_type = 'normalized';
+      }
+      // Debit
+      else if (/debit/.test(ct)) {
+        llmResponseJson.card_type = "Debit";
+        fieldSources.card_type = 'normalized';
+      }
+    }
+    // --- [FALLBACKS/REGEXS/LEGACY] ---
     // Fallback total
     if (!llmResponseJson.total_amount) {
-      const match = (typeof emailText === 'string' ? emailText : '').match(/total[\s:]*\$?([\d,]+\.\d{2})/i);
+      const match = (typeof emailText === 'string' ? emailText : '').match(
+        /(?:grand\s*total|total\s*due|total\s*amount|total|amount\s*due)[^\d\-]{0,20}(\-?\$?\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/im
+      );
       if (match) {
-        llmResponseJson.total_amount = parseFloat(match[1].replace(/,/g, ''));
+        llmResponseJson.total_amount = parseFloat(match[1].replace(/[^0-9.\-]/g, ''));
         fieldSources.total_amount = 'regex_fallback';
       }
     }
