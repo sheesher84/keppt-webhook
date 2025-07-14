@@ -15,15 +15,10 @@ const LLM_API_URL = process.env.LLM_API_URL || 'https://api.openai.com/v1/chat/c
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-export const config = {
-  api: {
-    bodyParser: false,
-  },
-};
+export const config = { api: { bodyParser: false } };
 
 async function ocrSpaceImage(filePath, fileName) {
   try {
-    console.log('[OCR] Sending for OCR:', filePath, 'as', fileName);
     const formData = new FormData();
     formData.append('file', fs.createReadStream(filePath), fileName);
     formData.append('language', 'eng');
@@ -36,7 +31,6 @@ async function ocrSpaceImage(filePath, fileName) {
       maxBodyLength: Infinity,
     });
     const parsedText = response.data?.ParsedResults?.[0]?.ParsedText || '';
-    console.log('[OCR] Received text length:', parsedText.length);
     return parsedText;
   } catch (err) {
     console.error('OCR.space error:', err?.response?.data || err);
@@ -58,13 +52,10 @@ function extractVendor({ subject, emailSender, bodyText }) {
   subject = typeof subject === 'string' ? subject : (Array.isArray(subject) ? subject.join(' ') : '');
   bodyText = typeof bodyText === 'string' ? bodyText : (Array.isArray(bodyText) ? bodyText.join(' ') : '');
   emailSender = typeof emailSender === 'string' ? emailSender : (Array.isArray(emailSender) ? emailSender.join(' ') : '');
-
   let match = subject.match(/(?:from|receipt from|order from|purchase from|eReceipt from)\s+([A-Za-z0-9\s.'&\-]+)/i);
   if (match) return match[1].trim();
-
   match = subject.match(/your [\w\s]+ from ([A-Za-z0-9\s.'&\-]+)/i);
   if (match) return match[1].trim();
-
   if (emailSender) {
     let domMatch = emailSender.match(/@([\w\-\.]+)/);
     if (domMatch) {
@@ -74,13 +65,10 @@ function extractVendor({ subject, emailSender, bodyText }) {
       }
     }
   }
-
   match = subject.match(/([A-Za-z\s'\-&]+)$/);
   if (match && match[1].length > 2) return match[1].trim();
-
   match = bodyText.match(/(?:^|\n)Vendor:\s*([A-Za-z0-9\s\-\&]+)/i);
   if (match) return match[1].trim();
-
   return null;
 }
 
@@ -89,34 +77,14 @@ function normalizeCategory(category, vendor, haystack) {
   let c = (category || '').toLowerCase();
   let h = (haystack || '').toLowerCase();
   const normalizationMap = [
-    { out: 'Travel', terms: [
-      'cruise', 'ferry', 'excursion', 'itinerary', 'voyage', 'sailing date', 'boarding', 'ship',
-      'airline', 'flight', 'hotel', 'lodging', 'car rental', 'rental car', 'travel', 'boarding pass', 'airbnb',
-      'uber', 'lyft', 'amtrak', 'train ticket', 'airport', 'transit', 'shuttle', 'reservation #', 'plan my cruise', 'taxi', 'ride', 'rideshare', 'bus ticket', 'subway', 'commute'
-    ]},
-    { out: 'Food & Drink', terms: [
-      'restaurant', 'food', 'dining', 'cafe', 'coffee', 'grille', 'starbucks', 'pizza', 'bar', 'bakery', 'juice',
-      'wine', 'brew', 'eatery', 'bistro'
-    ]},
-    { out: 'Shopping', terms: [
-      'shopping', 'order', 'store', 'apparel', 'retail', 'merchandise', 'clothing', 'footwear', 'accessories', 'gift card',
-      'fashion', 'mall', 'shoes', 'outlet', 'boutique', 'electronics'
-    ]},
-    { out: 'Groceries', terms: [
-      'grocery', 'groceries', 'market', 'whole foods', 'trader joe\'s', 'sprouts', 'food store', 'supermarket'
-    ]},
-    { out: 'Health', terms: [
-      'pharmacy', 'medicine', 'rx', 'doctor', 'dental', 'prescription', 'clinic', 'hospital', 'health'
-    ]},
-    { out: 'Subscriptions', terms: [
-      'icloud', 'netflix', 'subscription', 'membership', 'monthly', 'spotify', 'prime', 'plus', 'youtube', 'software'
-    ]},
-    { out: 'Utilities', terms: [
-      'utility', 'utilities', 'pg&e', 'sdge', 'water', 'electric', 'bill', 'internet', 'at&t', 'comcast', 'xfinity'
-    ]},
-    { out: 'Donations', terms: [
-      'donation', 'charity', 'nonprofit', 'foundation', 'tax-deductible'
-    ]}
+    { out: 'Travel', terms: ['cruise', 'ferry', 'excursion', 'itinerary', 'voyage', 'sailing date', 'boarding', 'ship', 'airline', 'flight', 'hotel', 'lodging', 'car rental', 'rental car', 'travel', 'boarding pass', 'airbnb', 'uber', 'lyft', 'amtrak', 'train ticket', 'airport', 'transit', 'shuttle', 'reservation #', 'plan my cruise', 'taxi', 'ride', 'rideshare', 'bus ticket', 'subway', 'commute'] },
+    { out: 'Food & Drink', terms: ['restaurant', 'food', 'dining', 'cafe', 'coffee', 'grille', 'starbucks', 'pizza', 'bar', 'bakery', 'juice', 'wine', 'brew', 'eatery', 'bistro'] },
+    { out: 'Shopping', terms: ['shopping', 'order', 'store', 'apparel', 'retail', 'merchandise', 'clothing', 'footwear', 'accessories', 'gift card', 'fashion', 'mall', 'shoes', 'outlet', 'boutique', 'electronics'] },
+    { out: 'Groceries', terms: ['grocery', 'groceries', 'market', 'whole foods', 'trader joe\'s', 'sprouts', 'food store', 'supermarket'] },
+    { out: 'Health', terms: ['pharmacy', 'medicine', 'rx', 'doctor', 'dental', 'prescription', 'clinic', 'hospital', 'health'] },
+    { out: 'Subscriptions', terms: ['icloud', 'netflix', 'subscription', 'membership', 'monthly', 'spotify', 'prime', 'plus', 'youtube', 'software'] },
+    { out: 'Utilities', terms: ['utility', 'utilities', 'pg&e', 'sdge', 'water', 'electric', 'bill', 'internet', 'at&t', 'comcast', 'xfinity'] },
+    { out: 'Donations', terms: ['donation', 'charity', 'nonprofit', 'foundation', 'tax-deductible'] }
   ];
   for (const norm of normalizationMap) {
     if (c && norm.terms.some(term => c.includes(term))) return norm.out;
@@ -188,7 +156,6 @@ export default async function handler(req, res) {
         bodyHtml = typeof bodyHtml === 'string' ? bodyHtml : (Array.isArray(bodyHtml) ? bodyHtml.join(' ') : '');
         emailSender = typeof emailSender === 'string' ? emailSender : (Array.isArray(emailSender) ? emailSender.join(' ') : '');
 
-        // --- Attachment processing with enhanced HEIC logic ---
         let attachmentText = '';
         if (isLowValueBody(bodyText) && files && Object.keys(files).length > 0) {
           const fileObjs = Object.values(files).flat();
@@ -204,36 +171,35 @@ export default async function handler(req, res) {
               let ocrFileName = file.originalFilename || file.newFilename;
               const ext = path.extname(ocrFilePath).toLowerCase();
 
-              // LOG: Every attachment
-              console.log('[Attachment] name=' + (file.originalFilename || file.newFilename) + ', type=' + file.mimetype + ', size=' + fs.statSync(file.filepath).size + ' bytes, ext=' + ext);
-
+              // --- HEIC conversion (always to JPG) ---
               if (['.heic', '.heif'].includes(ext)) {
-                // -- HEIC to PNG conversion --
-                console.log('[HEIC] Attempting conversion:', ocrFilePath);
                 try {
+                  console.log('[HEIC] Detected. Attempting conversion:', ocrFilePath);
                   const inputBuffer = fs.readFileSync(file.filepath);
                   const outputBuffer = await heicConvert({
                     buffer: inputBuffer,
-                    format: 'PNG',
+                    format: 'JPEG',
                     quality: 1,
                   });
-                  ocrFileName = path.basename(file.filepath, ext) + '.png';
+                  ocrFileName = path.basename(file.filepath, ext) + '.jpg';
                   ocrFilePath = path.join(os.tmpdir(), ocrFileName);
                   fs.writeFileSync(ocrFilePath, outputBuffer);
-                  console.log('[HEIC] Conversion success:', ocrFilePath);
+                  console.log('[HEIC] Conversion success. New path:', ocrFilePath);
                 } catch (err) {
                   console.error('[HEIC] Conversion failed:', err, 'File:', file.originalFilename || file.newFilename, ocrFilePath);
                   return res.status(400).json({ error: 'HEIC conversion failed. Please send a JPG/PNG or try resizing your photo before sending.' });
                 }
               }
-              // OCR as before, but use potentially converted file
+
+              // --- Send the now-converted (or original) image for OCR ---
               try {
-                console.log('[OCR] Preparing to send file:', ocrFilePath);
+                console.log('[OCR] Preparing to send file:', ocrFilePath, 'as', ocrFileName);
                 const ocrResult = await ocrSpaceImage(ocrFilePath, ocrFileName);
+                console.log('[OCR] Received text length:', ocrResult.length);
                 if (ocrResult && ocrResult.trim().length > 0) {
                   attachmentText += '\n' + ocrResult;
                 } else {
-                  // Empty result (even after conversion)
+                  // Empty result
                   attachmentText += '\n[OCR.space returned empty result. Image file may be corrupt or unreadable by OCR service.]';
                 }
               } catch (err) {
@@ -244,7 +210,6 @@ export default async function handler(req, res) {
           }
         }
 
-        // If OCR returned nothing, show an error for clarity
         if (!attachmentText && isLowValueBody(bodyText) && files && Object.keys(files).length > 0) {
           bodyText = "[OCR failed or returned no text. Please try resending or try again later.]";
         }
@@ -360,22 +325,17 @@ If any field is missing, use null. Output only JSON.\n\nReceipt email:\n${emailT
       const val = String(llmResponseJson.form_of_payment).toLowerCase();
       if (
         /card|credit|debit|chip|contactless|swipe|tap|stripe/.test(val) ||
-        ['mastercard', 'matercard', 'master card', 'mc', 'visa', 'amex', 'american express', 'discover', 'diners', 'jcb', 'unionpay'].some(network => val.includes(network))
+        ['mastercard', 'matercard', 'mc', 'master card', 'visa', 'amex', 'american express', 'discover', 'diners', 'jcb', 'unionpay'].some(network => val.includes(network))
       ) {
         llmResponseJson.form_of_payment = 'Card';
         fieldSources.form_of_payment = 'normalized';
       }
     }
-    // --- [IMPROVED] CARD_TYPE NORMALIZATION ---
+    // --- [NEW] CARD_TYPE NORMALIZATION ---
     if (llmResponseJson.card_type) {
-      let ct = String(llmResponseJson.card_type).toLowerCase().replace(/[\s\-]/g, '');
-      // Mastercard and variants -> MC
-      if (/^m[a@]st[e3]?r?c?a?r?d?$/i.test(ct) || /matercard/i.test(ct) || /mastercard/i.test(ct) || ct === "mc" || ct === "mastercard" || ct === "matercard") {
-        llmResponseJson.card_type = "MC";
-        fieldSources.card_type = 'normalized';
-      }
-      // Master Card with space, "master card", "Master Card" etc.
-      else if (ct.replace(/\s/g, '') === 'mastercard') {
+      let ct = String(llmResponseJson.card_type).toLowerCase();
+      // Mastercard variants -> MC
+      if (/master\s?card|matercard|mc/.test(ct)) {
         llmResponseJson.card_type = "MC";
         fieldSources.card_type = 'normalized';
       }
@@ -416,15 +376,10 @@ If any field is missing, use null. Output only JSON.\n\nReceipt email:\n${emailT
       if (cardMatch) {
         if (!llmResponseJson.card_type) {
           let type = cardMatch[1]?.replace(/American Express/i, 'Amex') || null;
-          if (/master\s*card/i.test(type)) {
-            llmResponseJson.card_type = 'MC';
-          } else if (/visa/i.test(type)) {
-            llmResponseJson.card_type = 'VISA';
-          } else if (/debit/i.test(type)) {
-            llmResponseJson.card_type = 'Debit';
-          } else {
-            llmResponseJson.card_type = type;
-          }
+          if (/master\s?card|matercard|mc/i.test(type)) type = "MC";
+          else if (/visa/i.test(type)) type = "VISA";
+          else if (/debit/i.test(type)) type = "Debit";
+          llmResponseJson.card_type = type;
           fieldSources.card_type = 'regex_fallback';
         }
         if (!llmResponseJson.card_last4) {
