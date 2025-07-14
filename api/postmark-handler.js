@@ -207,18 +207,27 @@ export default async function handler(req, res) {
               console.log('Attachment received:', file.originalFilename || file.newFilename, file.mimetype, fs.statSync(file.filepath).size);
 
               if (['.heic', '.heif'].includes(ext)) {
-                console.log('Attempting HEIC->PNG conversion:', file.originalFilename || file.newFilename, ocrFilePath);
+                console.log('Attempting HEIC conversion:', file.originalFilename || file.newFilename, ocrFilePath);
                 try {
                   const inputBuffer = fs.readFileSync(file.filepath);
                   const outputBuffer = await heicConvert({
                     buffer: inputBuffer,
-                    format: 'PNG', // PNG instead of JPEG
+                    format: 'PNG', // now using PNG for conversion
                     quality: 1,
                   });
-                  ocrFileName = path.basename(file.filepath, ext) + '.png'; // .png extension
+                  ocrFileName = path.basename(file.filepath, ext) + '.png';
                   ocrFilePath = path.join(os.tmpdir(), ocrFileName);
                   fs.writeFileSync(ocrFilePath, outputBuffer);
-                  console.log('HEIC conversion success (to PNG):', ocrFilePath);
+
+                  // ---- DEBUG LOG FOR HEIC CONVERT ----
+                  try {
+                    const stats = fs.statSync(ocrFilePath);
+                    console.log(`[HEIC->PNG Success] path=${ocrFilePath}, size=${stats.size} bytes`);
+                  } catch (e) {
+                    console.error('[HEIC->PNG File Missing]', e);
+                  }
+                  // ---- END DEBUG LOG ----
+
                 } catch (err) {
                   console.error('HEIC conversion failed:', err, 'File:', file.originalFilename || file.newFilename, ocrFilePath);
                   return res.status(400).json({ error: 'HEIC conversion failed. Please send a JPG/PNG or try resizing your photo before sending.' });
@@ -232,14 +241,14 @@ export default async function handler(req, res) {
                 }
               } catch (err) {
                 console.error('OCR fallback error:', err);
-                // ADD: record error in attachmentText for troubleshooting
+                // record error in attachmentText for troubleshooting
                 attachmentText += '\n[OCR failed: ' + (err.message || 'Unknown error') + ']';
               }
             }
           }
         }
 
-        // ADD: If OCR returned nothing, show an error for clarity
+        // If OCR returned nothing, show an error for clarity
         if (!attachmentText && isLowValueBody(bodyText) && files && Object.keys(files).length > 0) {
           bodyText = "[OCR failed or returned no text. Please try resending or try again later.]";
         }
