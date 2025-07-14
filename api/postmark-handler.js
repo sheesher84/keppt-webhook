@@ -4,7 +4,7 @@ import { IncomingForm } from 'formidable';
 import fs from 'fs';
 import axios from 'axios';
 import FormData from 'form-data';
-import heicConvert from 'heic-convert'; // HEIC support
+import heicConvert from 'heic-convert';
 import path from 'path';
 import os from 'os';
 
@@ -16,13 +16,12 @@ const LLM_API_URL = process.env.LLM_API_URL || 'https://api.openai.com/v1/chat/c
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 export const config = {
-  api: {
-    bodyParser: false,
-  },
+  api: { bodyParser: false },
 };
 
 async function ocrSpaceImage(filePath, fileName) {
   try {
+    console.log(`[OCR] Preparing to send file: ${filePath}`);
     const formData = new FormData();
     formData.append('file', fs.createReadStream(filePath), fileName);
     formData.append('language', 'eng');
@@ -35,9 +34,10 @@ async function ocrSpaceImage(filePath, fileName) {
       maxBodyLength: Infinity,
     });
     const parsedText = response.data?.ParsedResults?.[0]?.ParsedText || '';
+    console.log(`[OCR] Received text length: ${parsedText.length}`);
     return parsedText;
   } catch (err) {
-    console.error('OCR.space error:', err?.response?.data || err);
+    console.error('[OCR.space error]:', err?.response?.data || err);
     return '';
   }
 }
@@ -56,13 +56,10 @@ function extractVendor({ subject, emailSender, bodyText }) {
   subject = typeof subject === 'string' ? subject : (Array.isArray(subject) ? subject.join(' ') : '');
   bodyText = typeof bodyText === 'string' ? bodyText : (Array.isArray(bodyText) ? bodyText.join(' ') : '');
   emailSender = typeof emailSender === 'string' ? emailSender : (Array.isArray(emailSender) ? emailSender.join(' ') : '');
-
   let match = subject.match(/(?:from|receipt from|order from|purchase from|eReceipt from)\s+([A-Za-z0-9\s.'&\-]+)/i);
   if (match) return match[1].trim();
-
   match = subject.match(/your [\w\s]+ from ([A-Za-z0-9\s.'&\-]+)/i);
   if (match) return match[1].trim();
-
   if (emailSender) {
     let domMatch = emailSender.match(/@([\w\-\.]+)/);
     if (domMatch) {
@@ -72,13 +69,10 @@ function extractVendor({ subject, emailSender, bodyText }) {
       }
     }
   }
-
   match = subject.match(/([A-Za-z\s'\-&]+)$/);
   if (match && match[1].length > 2) return match[1].trim();
-
   match = bodyText.match(/(?:^|\n)Vendor:\s*([A-Za-z0-9\s\-\&]+)/i);
   if (match) return match[1].trim();
-
   return null;
 }
 
@@ -87,50 +81,24 @@ function normalizeCategory(category, vendor, haystack) {
   let c = (category || '').toLowerCase();
   let h = (haystack || '').toLowerCase();
   const normalizationMap = [
-    { out: 'Travel', terms: [
-      'cruise', 'ferry', 'excursion', 'itinerary', 'voyage', 'sailing date', 'boarding', 'ship',
-      'airline', 'flight', 'hotel', 'lodging', 'car rental', 'rental car', 'travel', 'boarding pass', 'airbnb',
-      'uber', 'lyft', 'amtrak', 'train ticket', 'airport', 'transit', 'shuttle', 'reservation #', 'plan my cruise', 'taxi', 'ride', 'rideshare', 'bus ticket', 'subway', 'commute'
-    ]},
-    { out: 'Food & Drink', terms: [
-      'restaurant', 'food', 'dining', 'cafe', 'coffee', 'grille', 'starbucks', 'pizza', 'bar', 'bakery', 'juice',
-      'wine', 'brew', 'eatery', 'bistro'
-    ]},
-    { out: 'Shopping', terms: [
-      'shopping', 'order', 'store', 'apparel', 'retail', 'merchandise', 'clothing', 'footwear', 'accessories', 'gift card',
-      'fashion', 'mall', 'shoes', 'outlet', 'boutique', 'electronics'
-    ]},
-    { out: 'Groceries', terms: [
-      'grocery', 'groceries', 'market', 'whole foods', 'trader joe\'s', 'sprouts', 'food store', 'supermarket'
-    ]},
-    { out: 'Health', terms: [
-      'pharmacy', 'medicine', 'rx', 'doctor', 'dental', 'prescription', 'clinic', 'hospital', 'health'
-    ]},
-    { out: 'Subscriptions', terms: [
-      'icloud', 'netflix', 'subscription', 'membership', 'monthly', 'spotify', 'prime', 'plus', 'youtube', 'software'
-    ]},
-    { out: 'Utilities', terms: [
-      'utility', 'utilities', 'pg&e', 'sdge', 'water', 'electric', 'bill', 'internet', 'at&t', 'comcast', 'xfinity'
-    ]},
-    { out: 'Donations', terms: [
-      'donation', 'charity', 'nonprofit', 'foundation', 'tax-deductible'
-    ]}
+    { out: 'Travel', terms: ['cruise', 'ferry', 'excursion', 'itinerary', 'voyage', 'sailing date', 'boarding', 'ship', 'airline', 'flight', 'hotel', 'lodging', 'car rental', 'rental car', 'travel', 'boarding pass', 'airbnb', 'uber', 'lyft', 'amtrak', 'train ticket', 'airport', 'transit', 'shuttle', 'reservation #', 'plan my cruise', 'taxi', 'ride', 'rideshare', 'bus ticket', 'subway', 'commute'] },
+    { out: 'Food & Drink', terms: ['restaurant', 'food', 'dining', 'cafe', 'coffee', 'grille', 'starbucks', 'pizza', 'bar', 'bakery', 'juice', 'wine', 'brew', 'eatery', 'bistro'] },
+    { out: 'Shopping', terms: ['shopping', 'order', 'store', 'apparel', 'retail', 'merchandise', 'clothing', 'footwear', 'accessories', 'gift card', 'fashion', 'mall', 'shoes', 'outlet', 'boutique', 'electronics'] },
+    { out: 'Groceries', terms: ['grocery', 'groceries', 'market', 'whole foods', 'trader joe\'s', 'sprouts', 'food store', 'supermarket'] },
+    { out: 'Health', terms: ['pharmacy', 'medicine', 'rx', 'doctor', 'dental', 'prescription', 'clinic', 'hospital', 'health'] },
+    { out: 'Subscriptions', terms: ['icloud', 'netflix', 'subscription', 'membership', 'monthly', 'spotify', 'prime', 'plus', 'youtube', 'software'] },
+    { out: 'Utilities', terms: ['utility', 'utilities', 'pg&e', 'sdge', 'water', 'electric', 'bill', 'internet', 'at&t', 'comcast', 'xfinity'] },
+    { out: 'Donations', terms: ['donation', 'charity', 'nonprofit', 'foundation', 'tax-deductible'] }
   ];
-  for (const norm of normalizationMap) {
-    if (c && norm.terms.some(term => c.includes(term))) return norm.out;
-  }
-  for (const norm of normalizationMap) {
-    if (h && norm.terms.some(term => h.includes(term))) return norm.out;
-  }
+  for (const norm of normalizationMap) if (c && norm.terms.some(term => c.includes(term))) return norm.out;
+  for (const norm of normalizationMap) if (h && norm.terms.some(term => h.includes(term))) return norm.out;
   if (category) return category.charAt(0).toUpperCase() + category.slice(1);
   return null;
 }
-
 function guessCategory({ category, vendor, subject, bodyText }) {
   const haystack = `${vendor || ''} ${subject || ''} ${bodyText || ''}`.toLowerCase();
   return normalizeCategory(category, vendor, haystack);
 }
-
 function extractCardDetailsFromHtml(html) {
   if (!html) return {};
   const $ = cheerio.load(html);
@@ -161,9 +129,7 @@ function extractCardDetailsFromHtml(html) {
 
 export default async function handler(req, res) {
   try {
-    if (req.method !== 'POST') {
-      return res.status(405).json({ error: 'Method Not Allowed' });
-    }
+    if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
 
     const contentType = req.headers['content-type'] || '';
     if (contentType.startsWith('multipart/')) {
@@ -186,7 +152,6 @@ export default async function handler(req, res) {
         bodyHtml = typeof bodyHtml === 'string' ? bodyHtml : (Array.isArray(bodyHtml) ? bodyHtml.join(' ') : '');
         emailSender = typeof emailSender === 'string' ? emailSender : (Array.isArray(emailSender) ? emailSender.join(' ') : '');
 
-        // --- Attachment processing with enhanced HEIC logic ---
         let attachmentText = '';
         if (isLowValueBody(bodyText) && files && Object.keys(files).length > 0) {
           const fileObjs = Object.values(files).flat();
@@ -198,57 +163,54 @@ export default async function handler(req, res) {
               )) &&
               fs.existsSync(file.filepath)
             ) {
-              // HEIC/HEIF enhanced logging and error handling
               let ocrFilePath = file.filepath;
               let ocrFileName = file.originalFilename || file.newFilename;
               const ext = path.extname(ocrFilePath).toLowerCase();
 
               // LOG: Every attachment
-              console.log('Attachment received:', file.originalFilename || file.newFilename, file.mimetype, fs.statSync(file.filepath).size);
+              console.log(`[Attachment] name=${file.originalFilename || file.newFilename}, type=${file.mimetype}, size=${fs.statSync(file.filepath).size} bytes, ext=${ext}`);
 
               if (['.heic', '.heif'].includes(ext)) {
-                console.log('Attempting HEIC conversion:', file.originalFilename || file.newFilename, ocrFilePath);
+                console.log(`[HEIC] Detected HEIC. Attempting conversion: ${ocrFilePath}`);
                 try {
                   const inputBuffer = fs.readFileSync(file.filepath);
                   const outputBuffer = await heicConvert({
                     buffer: inputBuffer,
-                    format: 'PNG', // now using PNG for conversion
+                    format: 'PNG',
                     quality: 1,
                   });
                   ocrFileName = path.basename(file.filepath, ext) + '.png';
                   ocrFilePath = path.join(os.tmpdir(), ocrFileName);
                   fs.writeFileSync(ocrFilePath, outputBuffer);
 
-                  // ---- DEBUG LOG FOR HEIC CONVERT ----
+                  // Extra debug output
                   try {
                     const stats = fs.statSync(ocrFilePath);
                     console.log(`[HEIC->PNG Success] path=${ocrFilePath}, size=${stats.size} bytes`);
                   } catch (e) {
                     console.error('[HEIC->PNG File Missing]', e);
                   }
-                  // ---- END DEBUG LOG ----
-
                 } catch (err) {
                   console.error('HEIC conversion failed:', err, 'File:', file.originalFilename || file.newFilename, ocrFilePath);
                   return res.status(400).json({ error: 'HEIC conversion failed. Please send a JPG/PNG or try resizing your photo before sending.' });
                 }
               }
-              // OCR as before, but use potentially converted file
+              // Before OCR
+              console.log(`[OCR] Sending for OCR: ${ocrFilePath} as ${ocrFileName}`);
               try {
                 const ocrResult = await ocrSpaceImage(ocrFilePath, ocrFileName);
+                console.log(`[OCR] Result length: ${ocrResult.length}`);
                 if (ocrResult && ocrResult.trim().length > 0) {
                   attachmentText += '\n' + ocrResult;
                 }
               } catch (err) {
                 console.error('OCR fallback error:', err);
-                // record error in attachmentText for troubleshooting
                 attachmentText += '\n[OCR failed: ' + (err.message || 'Unknown error') + ']';
               }
             }
           }
         }
 
-        // If OCR returned nothing, show an error for clarity
         if (!attachmentText && isLowValueBody(bodyText) && files && Object.keys(files).length > 0) {
           bodyText = "[OCR failed or returned no text. Please try resending or try again later.]";
         }
@@ -268,7 +230,7 @@ export default async function handler(req, res) {
       return;
     }
 
-    // Else: Regular POST (no attachments)
+    // -- REGULAR POST (no attachments) --
     const data = req.body;
     let emailSender = data['From'] || data['sender'] || '';
     let subject = data['Subject'] || data['subject'] || '';
@@ -289,6 +251,7 @@ export default async function handler(req, res) {
     await runMainParser({
       emailSender, subject, bodyText, bodyHtml, messageId, receivedAtIso, res
     });
+
   } catch (err) {
     console.error('Handler failure:', err);
     res.status(500).json({ error: 'Server error' });
