@@ -232,14 +232,14 @@ export default async function handler(req, res) {
                 }
               } catch (err) {
                 console.error('OCR fallback error:', err);
-                // ADD: record error in attachmentText for troubleshooting
+                // Improved: record error in attachmentText for troubleshooting
                 attachmentText += '\n[OCR failed: ' + (err.message || 'Unknown error') + ']';
               }
             }
           }
         }
 
-        // ADD: If OCR returned nothing, show an error for clarity
+        // If OCR returned nothing, show an error for clarity
         if (!attachmentText && isLowValueBody(bodyText) && files && Object.keys(files).length > 0) {
           bodyText = "[OCR failed or returned no text. Please try resending or try again later.]";
         }
