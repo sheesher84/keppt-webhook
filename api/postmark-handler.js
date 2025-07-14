@@ -186,7 +186,7 @@ export default async function handler(req, res) {
         bodyHtml = typeof bodyHtml === 'string' ? bodyHtml : (Array.isArray(bodyHtml) ? bodyHtml.join(' ') : '');
         emailSender = typeof emailSender === 'string' ? emailSender : (Array.isArray(emailSender) ? emailSender.join(' ') : '');
 
-        // --- Attachment processing with enhanced HEIC logic ---
+        // --- Attachment processing with enhanced HEIC logic + better HEIC debugging ---
         let attachmentText = '';
         if (isLowValueBody(bodyText) && files && Object.keys(files).length > 0) {
           const fileObjs = Object.values(files).flat();
@@ -198,12 +198,10 @@ export default async function handler(req, res) {
               )) &&
               fs.existsSync(file.filepath)
             ) {
-              // HEIC/HEIF enhanced logging and error handling
               let ocrFilePath = file.filepath;
               let ocrFileName = file.originalFilename || file.newFilename;
               const ext = path.extname(ocrFilePath).toLowerCase();
 
-              // LOG: Every attachment
               console.log('Attachment received:', file.originalFilename || file.newFilename, file.mimetype, fs.statSync(file.filepath).size);
 
               if (['.heic', '.heif'].includes(ext)) {
@@ -218,28 +216,39 @@ export default async function handler(req, res) {
                   ocrFileName = path.basename(file.filepath, ext) + '.jpg';
                   ocrFilePath = path.join(os.tmpdir(), ocrFileName);
                   fs.writeFileSync(ocrFilePath, outputBuffer);
-                  console.log('HEIC conversion success:', ocrFilePath);
+                  // Validate file after writing
+                  const stats = fs.statSync(ocrFilePath);
+                  console.log('HEIC conversion success:', ocrFilePath, 'New file size:', stats.size);
+                  if (!stats.size || stats.size < 512) {
+                    // Too small to be a valid JPEG
+                    attachmentText += '\n[HEIC conversion failed: Output file too small or invalid. Try resending as JPEG/PNG.]';
+                    continue;
+                  }
                 } catch (err) {
                   console.error('HEIC conversion failed:', err, 'File:', file.originalFilename || file.newFilename, ocrFilePath);
-                  return res.status(400).json({ error: 'HEIC conversion failed. Please send a JPG/PNG or try resizing your photo before sending.' });
+                  attachmentText += '\n[HEIC conversion failed. Please send a JPG/PNG or try resizing your photo before sending.]';
+                  continue; // Skip this file
                 }
               }
+
               // OCR as before, but use potentially converted file
               try {
                 const ocrResult = await ocrSpaceImage(ocrFilePath, ocrFileName);
                 if (ocrResult && ocrResult.trim().length > 0) {
                   attachmentText += '\n' + ocrResult;
+                } else {
+                  // If no text was returned, show explicit error
+                  attachmentText += '\n[OCR.space returned empty result. Image file may be corrupt or unreadable by OCR service.]';
                 }
               } catch (err) {
                 console.error('OCR fallback error:', err);
-                // Improved: record error in attachmentText for troubleshooting
                 attachmentText += '\n[OCR failed: ' + (err.message || 'Unknown error') + ']';
               }
             }
           }
         }
 
-        // If OCR returned nothing, show an error for clarity
+        // ADD: If OCR returned nothing, show an error for clarity
         if (!attachmentText && isLowValueBody(bodyText) && files && Object.keys(files).length > 0) {
           bodyText = "[OCR failed or returned no text. Please try resending or try again later.]";
         }
